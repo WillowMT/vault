@@ -16,6 +16,7 @@ function textPreview(content,entry,url){
     pre.textContent=await limitedText(response);
   }).catch(()=>{pre.textContent='Could not load this file. You can still download it.';});
 }
+export function pdfPreviewMode(ua=navigator?.userAgent||''){return /safari/i.test(ua)&&!/chrome|chromium|crios|fxios|edg|android/i.test(ua)?'tab':'frame';}
 function voiceNote(media){
   const wrap=document.createElement('div');wrap.className='voice-note';
   const head=document.createElement('div');head.className='voice-note-head';
@@ -34,7 +35,15 @@ export function showPreview(entry){
   const supported=new Set(['image/png','image/jpeg','image/gif','image/webp','image/avif','image/bmp','audio/mpeg','audio/mp4','audio/ogg','audio/wav','audio/webm','audio/flac','video/mp4','video/webm','video/ogg','video/quicktime']);
   const kind=fileCategory(entry);
   if(entry.mime==='application/pdf'){
-    const frame=document.createElement('iframe');frame.className='pdf-frame';frame.src=url;frame.title=entry.name;content.append(frame);
+    if(pdfPreviewMode()==='frame'){
+      const frame=document.createElement('iframe');frame.className='pdf-frame';frame.src=url;frame.title=entry.name;content.append(frame);
+    }else{
+      const panel=document.createElement('div');panel.className='unsupported-preview';
+      const p=document.createElement('p');p.textContent='Safari cannot show PDFs inside this dialog. Open it in a new tab — it stays in your private local session.';
+      const open=document.createElement('button');open.type='button';open.className='button primary pdf-open';open.textContent='Open PDF in a new tab';
+      open.onclick=()=>window.open(url,'_blank','noopener');
+      panel.append(p,open);content.append(panel);
+    }
   }else if(isTextEntry(entry)){
     textPreview(content,entry,url);
   }else if(supported.has(entry.mime)){
