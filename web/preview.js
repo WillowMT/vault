@@ -1,12 +1,19 @@
 export function fileCategory(entry){if(entry.kind==='folder')return 'folder';if(entry.mime?.startsWith('image/')&&entry.mime!=='image/svg+xml')return 'image';if(entry.mime?.startsWith('video/'))return 'video';if(entry.mime?.startsWith('audio/'))return 'audio';return 'document';}
 export function fileIcon(entry){const kind=fileCategory(entry),icon=document.createElement('span');icon.className=`file-icon ${kind}`;icon.setAttribute('aria-hidden','true');icon.textContent=({folder:'▱',image:'▧',video:'▷',audio:'♫',document:'▤'})[kind];return icon;}
 function isTextEntry(entry){return (entry.mime?.startsWith('text/')||/\.(txt|md|js|ts|json|css|sh|py)$/i.test(entry.name||''))&&entry.mime!=='text/html';}
+async function limitedText(response){
+  const reader=response.body?.getReader();
+  if(!reader)return (await response.text()).slice(0,1048576);
+  const decoder=new TextDecoder();let text='',total=0,done=false;
+  while(!done&&total<=1048576){const chunk=await reader.read();done=chunk.done;if(chunk.value){total+=chunk.value.length;text+=decoder.decode(chunk.value,{stream:true});}}
+  reader.cancel().catch(()=>{});
+  return done&&total<=1048576?text:`${text.slice(0,1048576)}\n\n… (truncated)`;
+}
 function textPreview(content,entry,url){
   const pre=document.createElement('pre');pre.className='text-preview';content.append(pre);
   fetch(url,{credentials:'same-origin',cache:'no-store'}).then(async response=>{
     if(!response.ok){pre.textContent='Could not load this file. You can still download it.';return;}
-    const text=await response.text();
-    pre.textContent=text.length>1048576?`${text.slice(0,1048576)}\n\n… (truncated)`:text;
+    pre.textContent=await limitedText(response);
   }).catch(()=>{pre.textContent='Could not load this file. You can still download it.';});
 }
 function voiceNote(media){
