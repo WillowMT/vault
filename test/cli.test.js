@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { readPassword } from '../src/cli/prompt.js';
+import { mkdtemp,rm,mkdir,writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { readPassword,readText } from '../src/cli/prompt.js';
 import { run } from '../src/cli/main.js';
 import { renderStatus } from '../src/cli/view.js';
+import { chooseVault } from '../src/cli/picker.js';
 
 test('password input is hidden and supports backspace and Unicode',async()=>{
   const input=new PassThrough();input.isTTY=true;let raw=false;input.setRawMode=value=>{raw=value;};
@@ -70,4 +74,86 @@ test('v2 starts locked without a password prompt and R recovers into a fresh bro
   for(let i=0;!opened&&i<20;i++)await new Promise(resolve=>setTimeout(resolve,1));
   input.write('q');await running;
   assert.equal(prompts,1);assert.equal(recovery.toString(),'recovery password');assert.equal(opened,'http://localhost:1/#fresh');
+});
+test('text prompt echoes input and supports backspace',async()=>{
+  const input=new PassThrough();input.isTTY=true;let raw=false;input.setRawMode=value=>{raw=value;};
+  const output=new PassThrough();let text='';output.on('data',data=>text+=data);
+  const answer=readText({input,output,label:'Vault location'});
+  input.write(Buffer.from('/tmp/ab\x7f\x7fc\r'));
+  assert.equal((await answer).toString(),'/tmp/c');assert.equal(raw,false);
+  assert.equal(text.includes('/tmp/c'),true);
+});
+test('vault picker selects by number and arrow keys, and quits on q',async()=>{
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  const output=new PassThrough();let text='';output.on('data',data=>text+=data);
+  const entries=[{name:'alpha',path:'/tmp/a'},{name:'beta',path:'/tmp/b',missing:true}];
+  const numbered=chooseVault({input,stdout:output,entries});
+  input.write('2');
+  assert.deepEqual(await numbered,{name:'beta',path:'/tmp/b',missing:true});
+  const arrows=chooseVault({input,stdout:output,entries});
+  input.write('\x1b[B\r');
+  assert.equal((await arrows).name,'beta');
+  const quit=chooseVault({input,stdout:output,entries});
+  input.write('q');
+  assert.equal(await quit,undefined);
+  const create=chooseVault({input,stdout:output,entries,allowCreate:true});
+  input.write('\x1b[B\x1b[B\r');
+  assert.equal(await create,'create');
+  const fallback=await chooseVault({input:new PassThrough(),stdout:output,entries:[{name:'a',path:'/a',lastOpenedAt:1},{name:'b',path:'/b',lastOpenedAt:5}]});
+  assert.equal(fallback.name,'b');
+});
+test('vaults subcommand registers, lists, and removes vaults',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-vaults-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const registryPath=join(root,'vaults.json'),vault=join(root,'my-vault');
+  await mkdir(vault);await writeFile(join(vault,'vault.json'),'{}');
+  const output=new PassThrough();let text='';output.on('data',data=>text+=data);
+  await run({argv:['vaults','--add',vault,'work'],stdin:new PassThrough(),stdout:output,registryPath});
+  assert.match(text,/Registered “work”/);
+  text='';await run({argv:['vaults'],stdin:new PassThrough(),stdout:output,registryPath});
+  assert.match(text,/work/);assert.match(text,/my-vault/);
+  await assert.rejects(run({argv:['vaults','--add',root,'second'],stdin:new PassThrough(),stdout:output,registryPath}),/vault\.json/);
+  text='';await run({argv:['vaults','--remove','work'],stdin:new PassThrough(),stdout:output,registryPath});
+  assert.match(text,/Files on disk were not touched/);
+  text='';await run({argv:['vaults'],stdin:new PassThrough(),stdout:output,registryPath});
+  assert.match(text,/No vaults registered/i);
+  await assert.rejects(run({argv:['vaults','--remove','work'],stdin:new PassThrough(),stdout:output,registryPath}),/not registered/i);
+});
+test('--vault resolves registry names to registered paths',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-alias-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const registryPath=join(root,'vaults.json'),vault=join(root,'work-vault');
+  await mkdir(vault);await writeFile(join(vault,'vault.json'),'{}');
+  const output=new PassThrough();let text='';output.on('data',data=>text+=data);
+  await run({argv:['vaults','--add',vault,'work'],stdin:new PassThrough(),stdout:output,registryPath});
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  let preparedPath;let running;const ready=new Promise(resolve=>{
+    running=run({argv:['--vault','work'],registryPath,stdin:input,stdout:output,passwordReader:async()=>Buffer.from('recovery password'),
+      prepareVault:async path=>{preparedPath=path;return {version:2,close:async()=>{}}},
+      startLockedServer:async()=>({origin:'http://localhost:1',launchUrl:'http://localhost:1/',close:async()=>{}}),
+      opener:async()=>{},onReady:resolve});
+  });
+  await ready;input.write('q');await running;
+  assert.equal(preparedPath,vault);
+});
+test('launch without --vault opens the most recently used vault when several are registered',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-recent-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const registryPath=join(root,'vaults.json');
+  await mkdir(join(root,'older'),{recursive:true});await mkdir(join(root,'newer'),{recursive:true});
+  const output=new PassThrough();let text='';output.on('data',data=>text+=data);
+  const {registerVault,saveRegistry}=await import('../src/vault/registry.js');
+  let registry={version:1,vaults:[]};
+  registry=(await registerVault(registry,join(root,'older'),'older')).registry;
+  registry=(await registerVault(registry,join(root,'newer'),'newer')).registry;
+  registry.vaults[0].lastOpenedAt=1;registry.vaults[1].lastOpenedAt=2;
+  await saveRegistry(registryPath,registry);
+  let preparedPath;let running;const ready=new Promise(resolve=>{
+    running=run({argv:[],registryPath,stdin:new PassThrough(),stdout:output,passwordReader:async()=>Buffer.from('recovery password'),
+      prepareVault:async path=>{preparedPath=path;return {version:2,close:async()=>{}}},
+      startLockedServer:async()=>({origin:'http://localhost:1',launchUrl:'http://localhost:1/',close:async()=>{}}),
+      opener:async()=>{},onReady:resolve});
+  });
+  await ready;process.emit('SIGINT');await running;
+  assert.equal(preparedPath,join(root,'newer'));
 });
