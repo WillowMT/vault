@@ -38,7 +38,11 @@ function galleryNav(entry,dir){
   button.onclick=()=>showPreview(entries[(index+dir+entries.length)%entries.length]);
   return button;
 }
-export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;if(galleryKeys){dialog.removeEventListener('keydown',galleryKeys);galleryKeys=null;}for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
+function toggleFullscreen(){
+  if(document.fullscreenElement)document.exitFullscreen?.();
+  else document.documentElement.requestFullscreen?.();
+}
+export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;if(galleryKeys){dialog.removeEventListener('keydown',galleryKeys);galleryKeys=null;}dialog.classList.remove('slideshow');for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
 export function showPreview(entry){
   clearPreview();const dialog=document.querySelector('#preview-dialog'),content=document.querySelector('#preview-content');
   document.querySelector('#preview-title').textContent=entry.name;document.querySelector('#preview-meta').textContent=`${bytes(entry.size)} · ${entry.mime||'File'}`;
@@ -62,17 +66,24 @@ export function showPreview(entry){
     if(kind==='image')media.alt=entry.name;else{media.controls=true;media.preload='metadata';}
     media.onerror=()=>{const p=document.createElement('p');p.textContent='This browser cannot preview this format. You can still download the original.';content.replaceChildren(p);};
     if(kind==='image'||kind==='video'){
+      dialog.classList.add('slideshow');
       const stage=document.createElement('div');stage.className='gallery-stage';stage.append(media);
       const prev=galleryNav(entry,-1),next=galleryNav(entry,1);
       if(prev&&next){
         stage.append(prev,next);
         galleryKeys=event=>{
+          if(event.key==='f'||event.key==='F'){event.preventDefault();toggleFullscreen();return;}
           if(event.key!=='ArrowRight'&&event.key!=='ArrowLeft')return;
           event.preventDefault();(event.key==='ArrowRight'?next:prev).click();
         };
         dialog.addEventListener('keydown',galleryKeys);
       }
-      content.append(stage);
+      const entries=galleryEntries(entry),index=entries.findIndex(item=>item.id===entry.id);
+      const counter=document.createElement('span');counter.className='gallery-counter';counter.textContent=`${index+1} / ${entries.length}`;
+      const fullscreen=document.createElement('button');fullscreen.type='button';fullscreen.className='gallery-fullscreen';fullscreen.setAttribute('aria-label','Toggle fullscreen');fullscreen.textContent='⛶';
+      fullscreen.onclick=toggleFullscreen;
+      const bar=document.createElement('div');bar.className='gallery-bar';bar.append(counter,fullscreen);
+      content.append(stage,bar);
     }else content.append(kind==='audio'?voiceNote(media):media);
   }else{
     const panel=document.createElement('div');panel.className='unsupported-preview';panel.append(fileIcon(entry));const p=document.createElement('p');p.textContent='This file is safely stored. Download it to open in its own app.';panel.append(p);content.append(panel);

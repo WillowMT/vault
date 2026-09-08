@@ -119,6 +119,7 @@ test('preview dialog renders pdf, text, and voice-note players',{timeout:20000},
   assert.ok(frame,'PDF iframe missing');assert.ok(frame.src.includes('/content'),'PDF iframe src wrong');
   doc.querySelector('#preview-close').click();
   await open('notes.txt');
+  assert.ok(!doc.querySelector('#preview-dialog').classList.contains('slideshow'),'Text preview must not use slideshow mode');
   const pre=await (async()=>{for(let i=0;i<150;i++){const node=doc.querySelector('#preview-content pre.text-preview');if(node?.textContent==='hello secret vault')return node;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('Text preview did not load');})();
   assert.ok(pre,'Text preview missing');
   doc.querySelector('#preview-close').click();
@@ -150,10 +151,15 @@ test('image preview navigates the gallery with arrows and keyboard',{timeout:200
   const open=name=>{const row=[...doc.querySelectorAll('.file-row')].find(n=>n.textContent.includes(name));[...row.querySelectorAll('button')].find(n=>n.textContent==='Preview').click();return until(()=>doc.querySelector('#preview-dialog[open]'),`${name} preview did not open`);};
   const title=()=>doc.querySelector('#preview-title').textContent;
   await open('sunrise.png');
+  const dialog=doc.querySelector('#preview-dialog');
+  assert.ok(dialog.classList.contains('slideshow'),'Image preview must open in slideshow mode');
   assert.ok(doc.querySelector('.gallery-prev')&&doc.querySelector('.gallery-next'),'Gallery arrows missing');
+  assert.equal(doc.querySelector('.gallery-counter').textContent,'1 / 2','Counter should show first position');
+  assert.ok(doc.querySelector('.gallery-fullscreen'),'Fullscreen toggle missing');
+  assert.equal(doc.querySelector('#preview-download').getAttribute('download'),'sunrise.png','Download must target the shown file');
   doc.querySelector('.gallery-next').click();
   await until(()=>title()==='sunset.png','Next arrow did not advance to sunset.png');
-  const dialog=doc.querySelector('#preview-dialog');
+  assert.equal(doc.querySelector('.gallery-counter').textContent,'2 / 2','Counter should follow navigation');
   dialog.dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
   await until(()=>title()==='sunrise.png','ArrowRight did not wrap to sunrise.png');
   dialog.dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));
@@ -183,7 +189,10 @@ test('video preview navigates the gallery with arrows and keyboard',{timeout:200
   const open=name=>{const row=[...doc.querySelectorAll('.file-row')].find(n=>n.textContent.includes(name));[...row.querySelectorAll('button')].find(n=>n.textContent==='Preview').click();return until(()=>doc.querySelector('#preview-dialog[open]'),`${name} preview did not open`);};
   const title=()=>doc.querySelector('#preview-title').textContent;
   await open('first.webm');
+  assert.ok(doc.querySelector('#preview-dialog').classList.contains('slideshow'),'Video preview must open in slideshow mode');
   assert.ok(doc.querySelector('.gallery-prev')&&doc.querySelector('.gallery-next'),'Gallery arrows missing');
+  assert.equal(doc.querySelector('.gallery-counter').textContent,'1 / 2','Counter should show first position');
+  assert.ok(doc.querySelector('.gallery-fullscreen'),'Fullscreen toggle missing');
   doc.querySelector('.gallery-next').click();
   await until(()=>title()==='second.webm','Next arrow did not advance to second.webm');
   doc.querySelector('#preview-dialog').dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
