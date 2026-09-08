@@ -187,6 +187,27 @@ test('bulk delete warns when a selected folder recursively deletes its child',{t
   doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
   await until(()=>doc.querySelectorAll('.file-row').length===0,'Selected folders were not deleted');
 });
+test('bulk delete removes select-all search results that include nested entries',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-bulk-delete-search-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('bulk delete search passphrase'));
+  const parent=await vault.mkdir(null,'Project'),child=await vault.mkdir(parent.id,'Project notes');
+  await vault.upload(child.id,'Project secret.txt','text/plain',[Buffer.from('secret')]);
+  await vault.upload(null,'Project plan.txt','text/plain',[Buffer.from('plan')]);
+  const app=await startServer(vault);
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelectorAll('.file-row').length===2,'Root entries did not load');
+  const search=doc.querySelector('#search');search.value='Project';search.dispatchEvent(new window.Event('input'));
+  await until(()=>doc.querySelectorAll('.file-row').length===4,'Nested search results did not load');
+  doc.querySelector('#select-all').click();doc.querySelector('#bulk-delete').click();
+  assert.match(doc.querySelector('#dialog-description').textContent,/4 selected/i);
+  doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>doc.querySelectorAll('.file-row').length===0,'Selected search results were not deleted');
+  assert.equal(doc.querySelector('#notice').textContent.includes('Not found'),false);
+  assert.equal(vault.list(null,'',{recursive:true}).length,0);
+});
 test('selection clears when the browser reloads',{timeout:20000},async t=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-selection-reload-'));
   const vault=await createVault(join(root,'vault'),Buffer.from('selection reload test passphrase'));
