@@ -40,6 +40,30 @@ File contents, names, folder structure, and metadata are encrypted. Files stream
 
 New vaults enroll a passkey during setup. After locking, relaunching presents a browser prompt to unlock with Touch ID instead of typing the password. The recovery password always works from the terminal (press **R** at the passkey prompt). Enrollment is per vault and stored inside the encrypted metadata; removing the vault removes the passkey's usefulness.
 
+## Multiple vaults
+
+Vaults are tracked in `~/.secretcli/vaults.json`. Launching `secretcli` without `--vault` opens your most recent vault, or shows a picker when several are registered. `secretcli --vault work` opens a vault by its list name; a filesystem path works too. Each `secretcli` process opens one vault — run a second `secretcli --vault other` in another terminal to work with two vaults at once (opening the same vault twice stays blocked).
+
+Manage the list with:
+
+```sh
+secretcli vaults                      # list registered vaults
+secretcli vaults --add ~/vaults/work  # register an existing vault (name optional)
+secretcli vaults --remove work        # unregister — files on disk are not touched
+```
+
+## Export and import
+
+```sh
+secretcli export --to backup.scvault                     # export your vault
+secretcli export --vault work --to work-backup.scvault   # export a named vault
+secretcli import backup.scvault --out ~/vaults/restored  # restore to a new directory
+```
+
+Export requires the vault to be closed (quit with Ctrl+C first) and needs no password: the archive contains only encrypted data, so it is safe to store on a USB drive or in cloud storage. Import verifies every file against the manifest's SHA-256 checksums while writing, refuses an existing destination, and registers the restored vault in your vault list. Unlock a restored vault with its original recovery password or passkey.
+
+Exporting an old backup and later unlocking its passkey can conflict with a newer passkey counter on hardware security keys; the recovery password always unlocks a restored vault.
+
 ## Locking and recovery
 
 There is **no password recovery**. Back up the entire vault directory while the CLI is stopped; restore the entire directory together. Deletion is permanent. Original files you upload and files you explicitly download remain outside the encrypted vault.

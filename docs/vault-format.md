@@ -61,6 +61,25 @@ General encrypted records contain a random 12-byte nonce, ciphertext, and a 16-b
 
 The current architecture does not rotate the vault key during passkey enrollment or replacement. Restoring an older valid v2 header can therefore restore an older passkey envelope that still unwraps the vault key and grants access to the current catalog and objects. Passkey replacement is not cryptographic revocation against header rollback; preventing that requires trusted rollback protection or vault-key rotation with data re-encryption.
 
+## Export archive (`.scvault`)
+
+An export archive is an uncompressed POSIX ustar tar containing one vault directory's encrypted payload. Entry order is fixed: `manifest.json` first, then `vault.json`, `catalog.enc`, then one entry per object under `objects/<uuid>` in sorted order. Runtime files (`.lock/`, `.recovery`, `*.partial`) are never included, and object names must be UUIDs.
+
+`manifest.json` records:
+
+```json
+{
+  "format": 1,
+  "vaultId": "UUID",
+  "headerVersion": 2,
+  "dataVersion": 1,
+  "exportedAt": "ISO timestamp",
+  "files": [{ "path": "vault.json", "size": 0, "sha256": "hex digest" }]
+}
+```
+
+Every non-manifest entry must appear in `files` with a matching size and SHA-256; importers verify each digest while streaming and reject unexpected, missing, duplicated, or oversized entries, archives whose first entry is not `manifest.json`, and archives written by a newer format version. The archive is ciphertext-only: no password, key, or PRF material is ever included, and export requires the vault to be closed (no `.lock`). Because the payload is already encrypted and high-entropy, compression is deliberately not applied. Import is atomic: extraction happens in a temporary sibling directory that is renamed into place only after every checksum verifies and `vault.json` parses as a supported header.
+
 ## Persistence and locking
 
 Uploads write encrypted `.partial` objects, sync and rename them, then commit the catalog. Catalog and header replacement use a same-directory temporary file, file sync, rename, and directory sync. Deletion commits metadata before unlinking objects. Orphan and partial objects are removed after exclusive lock acquisition and successful catalog authentication on startup. First-time setup reserves a fresh destination and publishes its staged files; interruption during publication can leave an incomplete setup which fails closed.

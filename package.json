@@ -1,6 +1,6 @@
 {
   "name": "secretcli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local encrypted drive, unlocked from your terminal",
   "license": "MIT",
   "author": "WillowMT",
