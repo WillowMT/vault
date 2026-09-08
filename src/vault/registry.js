@@ -1,0 +1,89 @@
+import { isAbsolute, resolve, basename } from 'node:path';
+import { readLimited, writeAtomic } from './atomic.js';
+
+const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const MAX_BYTES = 64 * 1024;
+
+export function emptyRegistry() {
+  return { version: 1, vaults: [] };
+}
+
+export function sanitizeName(value) {
+  const cleaned = value.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/, '');
+  return NAME_PATTERN.test(cleaned) ? cleaned : 'vault';
+}
+
+export function uniqueName(registry, desired) {
+  const taken = new Set(registry.vaults.map(entry => entry.name));
+  if (!taken.has(desired)) return desired;
+  for (let index = 2; ; index++) {
+    const candidate = `${desired.slice(0, 28)}-${index}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+function validEntry(entry) {
+  return Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)
+    && typeof entry.name === 'string' && NAME_PATTERN.test(entry.name)
+    && typeof entry.path === 'string' && isAbsolute(entry.path));
+}
+
+export async function loadRegistry(path) {
+  let bytes;
+  try {
+    bytes = await readLimited(path, MAX_BYTES);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { registry: emptyRegistry() };
+    return { registry: emptyRegistry(), warning: `The vault list at ${path} could not be read and was ignored.` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.vaults)) throw new Error('invalid registry');
+  } catch {
+    return { registry: emptyRegistry(), warning: `The vault list at ${path} could not be read and was ignored.` };
+  }
+  const vaults = [], dropped = [], seenNames = new Set(), seenPaths = new Set();
+  for (const entry of parsed.vaults) {
+    if (!validEntry(entry)) { dropped.push(String(entry?.name ?? 'unnamed')); continue; }
+    const name = entry.name, path = resolve(entry.path);
+    if (seenNames.has(name) || seenPaths.has(path)) { dropped.push(name); continue; }
+    seenNames.add(name); seenPaths.add(path);
+    vaults.push(Number.isFinite(entry.lastOpenedAt) ? { name, path, lastOpenedAt: entry.lastOpenedAt } : { name, path });
+  }
+  const registry = { version: 1, vaults };
+  return dropped.length
+    ? { registry, warning: `${dropped.length} invalid vault list ${dropped.length === 1 ? 'entry was' : 'entries were'} removed.` }
+    : { registry };
+}
+
+export async function saveRegistry(path, registry) {
+  await writeAtomic(path, Buffer.from(`${JSON.stringify(registry, null, 1)}\n`, 'utf8'));
+}
+
+export async function registerVault(registry, path, name) {
+  const target = resolve(path);
+  if (!isAbsolute(path)) throw new Error('Vault locations must be absolute paths');
+  if (name !== undefined && !NAME_PATTERN.test(name)) throw new Error('Vault names use lowercase letters, digits, and dashes (max 32).');
+  const desired = name ? name : sanitizeName(basename(target));
+  if (registry.vaults.some(entry => entry.name === desired)) throw new Error(`The name “${desired}” is already in use.`);
+  if (registry.vaults.some(entry => entry.path === target)) throw new Error(`The vault at ${target} is already registered`);
+  const entry = { name: uniqueName(registry, desired), path: target };
+  return { registry: { version: 1, vaults: [...registry.vaults, entry] }, entry };
+}
+
+export function resolveReference(registry, reference) {
+  if (typeof reference !== 'string') return undefined;
+  return registry.vaults.find(entry => entry.name === reference);
+}
+
+export function touchVault(registry, path) {
+  const target = resolve(path);
+  return { ...registry, vaults: registry.vaults.map(entry => entry.path === target ? { ...entry, lastOpenedAt: Date.now() } : entry) };
+}
+
+export function forgetVault(registry, name) {
+  const remaining = registry.vaults.filter(entry => entry.name !== name);
+  if (remaining.length === registry.vaults.length) throw new Error(`Vault “${name}” is not registered`);
+  return { version: 1, vaults: remaining };
+}
