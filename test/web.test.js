@@ -38,16 +38,21 @@ test('locked unlock page sends a serialized assertion and 32-byte PRF result',as
 
 test('enrollment page confirms the registered credential with its PRF result',async()=>{
   const result=Uint8Array.from({length:32},(_,i)=>31-i);
-  const registered={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{attestationObject:Uint8Array.of(2).buffer,clientDataJSON:Uint8Array.of(3).buffer,getTransports:()=>['internal']}};
+  const response=Object.create({getTransports:()=>['internal']});
+  Object.defineProperties(response,{attestationObject:{value:Uint8Array.of(2).buffer},clientDataJSON:{value:Uint8Array.of(3).buffer}});
+  const registered={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',authenticatorAttachment:'platform',response};
   const confirmed={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(4).buffer,clientDataJSON:Uint8Array.of(5).buffer,signature:Uint8Array.of(6).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
   let gets=0;
-  const {window,requests}=await unlockPage('enrollment',[{challenge:'AQI'},{challenge:'AwQ'}],{create:async()=>registered,get:async()=>{gets++;return confirmed;}});
+  const registration={challenge:'AQI',rp:{id:'localhost',name:'SecretCLI'},user:{id:'BQY',name:'vault',displayName:'Vault'}};
+  const {window,requests}=await unlockPage('enrollment',[registration,{challenge:'AwQ'}],{create:async options=>{assert.equal(options.publicKey.rp.id,'localhost');assert.equal(options.publicKey.user.id.byteLength,2);return registered;},get:async()=>{gets++;return confirmed;}});
 
   window.document.querySelector('button').click();
   await until(()=>requests.length===3,()=>`Enrollment did not complete: ${requests.length} ${window.document.querySelector('.unlock-message').textContent}`);
   assert.deepEqual(requests.map(([path])=>path),['/api/passkey/registration/options','/api/passkey/registration/verify','/api/passkey/registration/confirm']);
   assert.equal(gets,1);
   assert.equal(requests[1][1].credential.response.attestationObject,'Ag');
+  assert.equal(requests[1][1].credential.response.clientDataJSON,'Aw');
+  assert.equal(requests[1][1].credential.authenticatorAttachment,'platform');
   assert.equal(requests[2][1].prf,Buffer.from(result).toString('base64url'));
 });
 

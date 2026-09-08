@@ -31,10 +31,13 @@ function buffer(value){
   return output.buffer;
 }
 
-function nativeOptions(value,key=''){
-  if(Array.isArray(value))return value.map(item=>nativeOptions(item,key));
-  if(!value||typeof value!=='object')return ['challenge','id','userHandle','first'].includes(key)&&typeof value==='string'?buffer(value):value;
-  return Object.fromEntries(Object.entries(value).map(([name,item])=>[name,nativeOptions(item,name)]));
+function nativeOptions(value,key='',parent=''){
+  if(Array.isArray(value))return value.map(item=>nativeOptions(item,'',key));
+  if(!value||typeof value!=='object'){
+    const binary=key==='challenge'||key==='userHandle'||key==='first'||(key==='id'&&['user','allowCredentials','excludeCredentials'].includes(parent));
+    return binary&&typeof value==='string'?buffer(value):value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([name,item])=>[name,nativeOptions(item,name,key)]));
 }
 
 function json(value){
@@ -46,15 +49,27 @@ function json(value){
 }
 
 function credentialJSON(credential){
-  const response=json(credential.response);
-  if(typeof credential.response.getTransports==='function')response.transports=credential.response.getTransports();
-  return {
+  const source=credential.response,response={clientDataJSON:base64url(source.clientDataJSON)};
+  if(source.attestationObject!==undefined){
+    response.attestationObject=base64url(source.attestationObject);
+    if(typeof source.getTransports==='function')response.transports=source.getTransports();
+    if(typeof source.getPublicKeyAlgorithm==='function')response.publicKeyAlgorithm=source.getPublicKeyAlgorithm();
+    if(typeof source.getPublicKey==='function'){const publicKey=source.getPublicKey();if(publicKey)response.publicKey=base64url(publicKey);}
+    if(source.authenticatorData!==undefined)response.authenticatorData=base64url(source.authenticatorData);
+  }else{
+    response.authenticatorData=base64url(source.authenticatorData);
+    response.signature=base64url(source.signature);
+    response.userHandle=source.userHandle===null?null:base64url(source.userHandle);
+  }
+  const result={
     id:credential.id,
     rawId:base64url(credential.rawId),
     type:credential.type,
     response,
     clientExtensionResults:json(credential.getClientExtensionResults?.()||{})
   };
+  if(credential.authenticatorAttachment)result.authenticatorAttachment=credential.authenticatorAttachment;
+  return result;
 }
 
 function prfResult(credential){
