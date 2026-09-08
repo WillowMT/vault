@@ -35,6 +35,12 @@ test('locked server advertises localhost and restricts assets and vault APIs', a
   t.after(() => app.close());
 
   assert.match(app.origin, /^http:\/\/localhost:\d+$/);
+  const page = (await (await fetch(app.origin + '/')).text()).toString();
+  assert.match(page, /data-mode="locked"/);
+  assert.match(page, /unlock-card/);
+  assert.match(page, /◆/);
+  assert.match(page, /Vault locked/);
+  assert.match(page, /recovery password/);
   assert.equal((await fetch(app.origin + '/')).status, 200);
   assert.equal((await fetch(app.origin + '/styles.css')).status, 200);
   assert.equal((await fetch(app.origin + '/app.js')).status, 404);
