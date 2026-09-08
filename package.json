@@ -16,5 +16,8 @@
   },
   "devDependencies": {
     "happy-dom": "^20.14.0"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^13.3.0"
   }
 }

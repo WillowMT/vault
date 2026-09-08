@@ -1,10 +1,19 @@
-import { randomBytes, scrypt, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, scrypt, createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto';
 import { promisify } from 'node:util';
-import { KDF } from './format.js';
+import { HEADER_VERSION, KDF } from './format.js';
 const scryptAsync = promisify(scrypt);
 export async function deriveKey(password, salt) {
   if (salt.length !== 32) throw new Error('Invalid salt');
   return scryptAsync(password, salt, 32, KDF);
+}
+export function derivePasskeyKey(prfOutput, salt, vaultId, credentialId) {
+  if (!Buffer.isBuffer(prfOutput) || prfOutput.length !== 32) throw new Error('Invalid WebAuthn PRF output');
+  if (!Buffer.isBuffer(salt) || salt.length !== 32) throw new Error('Invalid passkey PRF salt');
+  if (typeof vaultId !== 'string' || typeof credentialId !== 'string') throw new Error('Invalid passkey context');
+  const info = Buffer.from(JSON.stringify(['secretcli-passkey-wrap', HEADER_VERSION, vaultId, credentialId]));
+  const input = Buffer.from(prfOutput);
+  try { return Buffer.from(hkdfSync('sha256', input, salt, info, 32)); }
+  finally { input.fill(0); }
 }
 export function encrypt(key, plain, context, nonce) {
   const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });

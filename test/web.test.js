@@ -2,11 +2,63 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Browser } from 'happy-dom';
 import { mkdtemp,rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Window } from 'happy-dom';
 import { createVault } from '../src/vault/vault.js';
 import { startServer } from '../src/server/server.js';
 async function until(fn,message){for(let i=0;i<150;i++){if(fn())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error(typeof message==='function'?message():message);}
+
+async function unlockPage(mode,responses,credentials){
+  const window=new Window({url:'http://localhost/'}),requests=[];
+  window.document.body.dataset.mode=mode;
+  window.document.body.innerHTML=`<main><h1>${mode}</h1></main>`;
+  window.PublicKeyCredential=class {};
+  Object.defineProperty(window.navigator,'credentials',{value:credentials});
+  window.fetch=async(path,init={})=>{
+    requests.push([path,JSON.parse(init.body||'{}')]);
+    return {ok:true,json:async()=>responses.shift()};
+  };
+  window.eval(await readFile(new URL('../web/unlock.js',import.meta.url),'utf8'));
+  return {window,requests};
+}
+
+test('locked unlock page sends a serialized assertion and 32-byte PRF result',async()=>{
+  const result=Uint8Array.from({length:32},(_,i)=>i);
+  const credential={id:'credential-id',rawId:Uint8Array.of(1,2).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(3).buffer,clientDataJSON:Uint8Array.of(4).buffer,signature:Uint8Array.of(5).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
+  const {window,requests}=await unlockPage('locked',[{challenge:'AQI',allowCredentials:[{id:'AwQ',type:'public-key'}]}],{get:async options=>{assert.equal(options.publicKey.challenge.byteLength,2);return credential;}});
+
+  window.document.querySelector('button').click();
+  await until(()=>requests.length===2,()=>`Authentication did not complete: ${requests.length} ${window.document.querySelector('.unlock-message').textContent}`);
+  assert.equal(requests[0][0],'/api/passkey/authentication/options');
+  assert.equal(requests[1][0],'/api/passkey/authentication/verify');
+  assert.deepEqual(requests[1][1],{credential:{id:'credential-id',rawId:'AQI',type:'public-key',response:{authenticatorData:'Aw',clientDataJSON:'BA',signature:'BQ',userHandle:null},clientExtensionResults:{prf:{results:{first:'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'}}}},prf:Buffer.from(result).toString('base64url')});
+});
+
+test('enrollment page confirms the registered credential with its PRF result',async()=>{
+  const result=Uint8Array.from({length:32},(_,i)=>31-i);
+  const registered={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{attestationObject:Uint8Array.of(2).buffer,clientDataJSON:Uint8Array.of(3).buffer,getTransports:()=>['internal']}};
+  const confirmed={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(4).buffer,clientDataJSON:Uint8Array.of(5).buffer,signature:Uint8Array.of(6).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
+  let gets=0;
+  const {window,requests}=await unlockPage('enrollment',[{challenge:'AQI'},{challenge:'AwQ'}],{create:async()=>registered,get:async()=>{gets++;return confirmed;}});
+
+  window.document.querySelector('button').click();
+  await until(()=>requests.length===3,()=>`Enrollment did not complete: ${requests.length} ${window.document.querySelector('.unlock-message').textContent}`);
+  assert.deepEqual(requests.map(([path])=>path),['/api/passkey/registration/options','/api/passkey/registration/verify','/api/passkey/registration/confirm']);
+  assert.equal(gets,1);
+  assert.equal(requests[1][1].credential.response.attestationObject,'Ag');
+  assert.equal(requests[2][1].prf,Buffer.from(result).toString('base64url'));
+});
+
+test('unlock page directs the user to terminal recovery when PRF is unavailable',async()=>{
+  const credential={id:'credential-id',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(2).buffer,clientDataJSON:Uint8Array.of(3).buffer,signature:Uint8Array.of(4).buffer,userHandle:null},getClientExtensionResults:()=>({})};
+  const {window,requests}=await unlockPage('locked',[{challenge:'AQ'}],{get:async()=>credential});
+
+  window.document.querySelector('button').click();
+  await until(()=>window.document.querySelector('.unlock-message').textContent.includes('terminal'),'PRF recovery instruction was not shown');
+  assert.equal(requests.length,1);
+});
 test('browser UI creates folders, uploads, searches, renames, moves and clears on disconnect',{timeout:20000},async t=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-web-'));
   const vault=await createVault(join(root,'vault'),Buffer.from('browser test passphrase'));

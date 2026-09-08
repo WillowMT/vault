@@ -1,7 +1,7 @@
 import { readdir, unlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createCatalog, loadCatalog } from './catalog.js';
+import { createCatalog, loadCatalog, prepareCatalog } from './catalog.js';
 import { writeObject, readObject } from './objects.js';
 import { VaultError } from './format.js';
 
@@ -10,6 +10,37 @@ const publicEntry=({objectId,fileKey,...entry})=>({...entry});
 function validName(name){if(typeof name!=='string'||!name.trim()||Buffer.byteLength(name)>255||/[\x00-\x1f\x7f/\\]/.test(name)||name==='.'||name==='..')throw new VaultError('Choose a valid name (up to 255 bytes, without slashes or control characters)');return name;}
 export async function createVault(path,password){return build(path,await createCatalog(path,password));}
 export async function unlockVault(path,password){return build(path,await loadCatalog(path,password));}
+export async function prepareVault(path){
+  const prepared=await prepareCatalog(path);
+  let closing=false,closed=false,inFlight,closePromise;
+  function unlock(open){
+    if(closing||closed)return Promise.reject(new Error('Prepared vault is closed'));
+    if(inFlight)return Promise.reject(new Error('An unlock attempt is already in progress'));
+    const work=(async()=>{
+      const vault=await build(path,await open());
+      if(closing){await vault.close();throw new Error('Prepared vault is closed');}
+      return vault;
+    })();
+    inFlight=work;
+    void work.then(()=>{if(inFlight===work)inFlight=undefined;},()=>{if(inFlight===work)inFlight=undefined;});
+    return work;
+  }
+  return {version:prepared.version,vaultId:prepared.vaultId,passkey:prepared.passkey,
+    unlockWithPassword:password=>unlock(()=>prepared.unlockWithPassword(password)),
+    unlockWithPasskey:(prfOutput,newCounter)=>unlock(()=>prepared.unlockWithPasskey(prfOutput,newCounter)),
+    close(){
+      if(closePromise)return closePromise;
+      closing=true;
+      const pending=inFlight;
+      closePromise=(async()=>{
+        await prepared.close();
+        if(pending)try{const vault=await pending;await vault.close();}catch{}
+        closed=true;
+      })();
+      return closePromise;
+    }
+  };
+}
 async function build(path,catalog){
   const directory=join(path,'objects');let entries=catalog.entries.map(e=>({...e}));
   let closing=false,closed=false,queue=Promise.resolve(),closePromise;
@@ -102,9 +133,18 @@ async function build(path,catalog){
       try{for await(const bytes of readObject(directory,catalog.vaultId,e.objectId,key,e.size,start,end)){active();yield bytes;}}
       finally{key.fill(0);const remaining=readers.get(e.objectId)-1;if(remaining)readers.set(e.objectId,remaining);else{readers.delete(e.objectId);if(deferred.delete(e.objectId))await discard(e.objectId);}}
     },
+    enrollPasskey(password,metadata,prfOutput){
+      try{active();}catch(error){return Promise.reject(error);}
+      const snapshot=metadata&&{...metadata,transports:Array.isArray(metadata.transports)?[...metadata.transports]:metadata.transports};
+      const prf=Buffer.isBuffer(prfOutput)?Buffer.from(prfOutput):prfOutput;
+      const work=queue.then(async()=>{active();return catalog.enrollPasskey(password,snapshot,prf);}).finally(()=>{if(prf!==prfOutput)prf.fill(0);});
+      queue=work.catch(()=>{});return work;
+    },
     close(){
       if(closePromise)return closePromise;closing=true;
       closePromise=(async()=>{for(const job of uploads)job.controller.abort();await Promise.all([...uploads].map(j=>j.finished));await queue;entries=[];closed=true;await catalog.close();})();return closePromise;
     }
-  };return api;
+  };
+  Object.defineProperty(api,'vaultId',{value:catalog.vaultId,enumerable:true});
+  return api;
 }

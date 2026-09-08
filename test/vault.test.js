@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createVault, unlockVault } from '../src/vault/vault.js';
+import { createVault, prepareVault, unlockVault } from '../src/vault/vault.js';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'secretcli-test-'));
@@ -14,6 +14,23 @@ async function fixture(t) {
   return { vault, path, password };
 }
 async function collect(stream) { const parts=[]; for await (const part of stream) parts.push(part); return Buffer.concat(parts); }
+function passkeyMetadata() {
+  return {
+    credentialId: Buffer.from('test credential id').toString('base64url'),
+    publicKey: Buffer.from('test public key').toString('base64url'),
+    counter: 4,
+    transports: ['internal', 'hybrid'],
+    prfSalt: Buffer.alloc(32, 7).toString('base64')
+  };
+}
+
+test('unlocked vault exposes an immutable vault ID', async t => {
+  const { vault } = await fixture(t);
+  const vaultId = vault.vaultId;
+  assert.match(vaultId, /^[0-9a-f-]{36}$/i);
+  assert.throws(() => { vault.vaultId = 'changed'; }, TypeError);
+  assert.equal(vault.vaultId, vaultId);
+});
 
 test('vault encrypts names and contents and survives reopening', async t => {
   const {vault,path,password} = await fixture(t);
@@ -114,4 +131,177 @@ test('recursive listing includes nested media without exposing encryption keys',
   const {vault}=await fixture(t);const folder=await vault.mkdir(null,'Media');
   await vault.upload(folder.id,'sound.wav','audio/wav',[Buffer.from('test')]);
   const all=vault.list(null,'',{recursive:true});assert.equal(all.length,2);assert.equal(JSON.stringify(all).includes('fileKey'),false);
+});
+
+test('v1 enrollment atomically adds recovery and passkey envelopes without rewriting data', async t => {
+  const {vault,path,password}=await fixture(t);
+  await vault.upload(null,'kept.txt','text/plain',[Buffer.from('kept')]);
+  const catalogBefore=await readFile(join(path,'catalog.enc'));
+  const objectName=(await readdir(join(path,'objects')))[0];
+  const objectBefore=await readFile(join(path,'objects',objectName));
+  const prfOutput=Buffer.alloc(32,9),metadata=passkeyMetadata();
+
+  await vault.enrollPasskey(password,metadata,prfOutput);
+
+  const header=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(header.version,2);
+  assert.equal(header.dataVersion,1);
+  assert.equal(header.recovery.salt.length,44);
+  assert.equal(typeof header.recovery.wrapped,'string');
+  assert.equal(header.passkey.credentialId,metadata.credentialId);
+  assert.equal(typeof header.passkey.wrapped,'string');
+  assert.deepEqual(await readFile(join(path,'catalog.enc')),catalogBefore);
+  assert.deepEqual(await readFile(join(path,'objects',objectName)),objectBefore);
+});
+
+test('prepared v2 vault preserves caller PRF buffers and permits passkey retry while retaining its lock', async t => {
+  const {vault,path,password}=await fixture(t);
+  const metadata=passkeyMetadata(),prfOutput=Buffer.alloc(32,11);
+  await vault.mkdir(null,'private');
+  await vault.enrollPasskey(password,metadata,prfOutput);
+  await vault.close();
+
+  const prepared=await prepareVault(path);
+  assert.equal(prepared.version,2);
+  assert.equal(prepared.vaultId.length,36);
+  assert.deepEqual(prepared.passkey,metadata);
+  const wrongPrf=Buffer.alloc(32,12),wrongPrfBefore=Buffer.from(wrongPrf);
+  await assert.rejects(prepared.unlockWithPasskey(wrongPrf,5),/unlock|damaged/i);
+  assert.deepEqual(wrongPrf,wrongPrfBefore);
+  await assert.rejects(prepareVault(path),/already|open|locked/i);
+  const prfBefore=Buffer.from(prfOutput);
+  const reopened=await prepared.unlockWithPasskey(prfOutput,5);
+  assert.deepEqual(prfOutput,prfBefore);
+  try { assert.equal(reopened.list()[0].name,'private'); } finally { await reopened.close(); }
+});
+
+test('prepared v2 vault permits password retry and v1 remains supported', async t => {
+  const {vault,path,password}=await fixture(t);
+  const originalHeader=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(originalHeader.version,1);
+  await vault.close();
+
+  const v1=await prepareVault(path);
+  assert.equal(v1.version,1);
+  assert.equal(v1.passkey,null);
+  await assert.rejects(v1.unlockWithPassword(Buffer.from('wrong')),/password|unlock/i);
+  const reopened=await v1.unlockWithPassword(password);
+  await reopened.enrollPasskey(password,passkeyMetadata(),Buffer.alloc(32,13));
+  await reopened.close();
+
+  const v2=await prepareVault(path);
+  await assert.rejects(v2.unlockWithPassword(Buffer.from('wrong')),/password|unlock/i);
+  const recovered=await v2.unlockWithPassword(password);
+  await recovered.close();
+});
+
+test('failed enrollment leaves the v1 header unchanged and usable', async t => {
+  const {vault,path,password}=await fixture(t);
+  const before=await readFile(join(path,'vault.json'));
+  await assert.rejects(vault.enrollPasskey(Buffer.from('wrong'),passkeyMetadata(),Buffer.alloc(32,15)),/password|unlock/i);
+  await assert.rejects(vault.enrollPasskey(password,{...passkeyMetadata(),prfSalt:'bad'},Buffer.alloc(32,15)),/passkey|salt|metadata/i);
+  await assert.rejects(vault.enrollPasskey(password,{...passkeyMetadata(),credentialId:'not base64!'},Buffer.alloc(32,15)),/credential/i);
+  await assert.rejects(vault.enrollPasskey(password,{...passkeyMetadata(),publicKey:'eA=='},Buffer.alloc(32,15)),/public key/i);
+  await assert.rejects(vault.enrollPasskey(password,{...passkeyMetadata(),transports:['internal','bogus']},Buffer.alloc(32,15)),/transport/i);
+  assert.deepEqual(await readFile(join(path,'vault.json')),before);
+  await vault.close();
+  const reopened=await unlockVault(path,password);
+  await reopened.close();
+});
+
+test('prepared vault allows only one concurrent unlock attempt', async t => {
+  const {vault,path,password}=await fixture(t);
+  const prfOutput=Buffer.alloc(32,17);
+  await vault.enrollPasskey(password,passkeyMetadata(),prfOutput);
+  await vault.close();
+  const prepared=await prepareVault(path);
+
+  const results=await Promise.allSettled([
+    prepared.unlockWithPasskey(prfOutput,5),
+    prepared.unlockWithPasskey(prfOutput,5)
+  ]);
+
+  assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+  assert.equal(results.filter(result=>result.status==='rejected').length,1);
+  for(const result of results)if(result.status==='fulfilled')await result.value.close();
+});
+
+test('malformed v2 metadata releases the lock and a modified passkey envelope fails closed', async t => {
+  const {vault,path,password}=await fixture(t);
+  const prfOutput=Buffer.alloc(32,19);
+  await vault.enrollPasskey(password,passkeyMetadata(),prfOutput);
+  await vault.close();
+  const header=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  await writeFile(join(path,'vault.json'),JSON.stringify({...header,vaultId:'not-a-uuid'}));
+  await assert.rejects(prepareVault(path),/unsupported/i);
+  await writeFile(join(path,'vault.json'),JSON.stringify({...header,dataVersion:2}));
+  await assert.rejects(prepareVault(path),/unsupported/i);
+
+  const wrapped=Buffer.from(header.passkey.wrapped,'base64');
+  wrapped[12]^=1;
+  header.passkey.wrapped=wrapped.toString('base64');
+  await writeFile(join(path,'vault.json'),JSON.stringify(header));
+  const prepared=await prepareVault(path);
+  await assert.rejects(prepared.unlockWithPasskey(prfOutput,4),/unlock|damaged/i);
+  const recovered=await prepared.unlockWithPassword(password);
+  await recovered.close();
+});
+
+test('passkey unlock authenticates and atomically persists a nondecreasing counter', async t => {
+  const {vault,path,password}=await fixture(t);
+  const prfOutput=Buffer.alloc(32,21);
+  await vault.enrollPasskey(password,passkeyMetadata(),prfOutput);
+  await vault.close();
+  const before=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  const prepared=await prepareVault(path);
+  await assert.rejects(prepared.unlockWithPasskey(prfOutput,3),/counter/i);
+  const reopened=await prepared.unlockWithPasskey(prfOutput,9);
+  await reopened.close();
+
+  const after=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(after.passkey.counter,9);
+  assert.notEqual(after.passkey.wrapped,before.passkey.wrapped);
+});
+
+test('tampering with the stored passkey counter invalidates its envelope', async t => {
+  const {vault,path,password}=await fixture(t);
+  const prfOutput=Buffer.alloc(32,23);
+  await vault.enrollPasskey(password,passkeyMetadata(),prfOutput);
+  await vault.close();
+  const header=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  header.passkey.counter++;
+  await writeFile(join(path,'vault.json'),JSON.stringify(header));
+
+  const prepared=await prepareVault(path);
+  await assert.rejects(prepared.unlockWithPasskey(prfOutput,header.passkey.counter),/unlock|damaged/i);
+  const recovered=await prepared.unlockWithPassword(password);
+  await recovered.close();
+});
+
+test('closing a prepared vault waits for and cancels an in-flight unlock', async t => {
+  const {vault,path,password}=await fixture(t);
+  await vault.close();
+  const prepared=await prepareVault(path);
+  const unlocking=prepared.unlockWithPassword(password);
+  const closing=prepared.close();
+
+  await closing;
+  await assert.rejects(unlocking,/closed|locked/i);
+  const next=await prepareVault(path);
+  await next.close();
+});
+
+test('closing during passkey unlock releases ownership even after counter persistence', async t => {
+  const {vault,path,password}=await fixture(t);
+  const prfOutput=Buffer.alloc(32,25);
+  await vault.enrollPasskey(password,passkeyMetadata(),prfOutput);
+  await vault.close();
+  const prepared=await prepareVault(path);
+  const unlocking=prepared.unlockWithPasskey(prfOutput,7);
+
+  await prepared.close();
+  await assert.rejects(unlocking,/closed|locked/i);
+  const next=await prepareVault(path);
+  const recovered=await next.unlockWithPassword(password);
+  await recovered.close();
 });
