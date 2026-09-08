@@ -13,3 +13,7 @@
 .file-card .file-thumb{width:100%;height:auto;aspect-ratio:1/1;margin-bottom:6px}
 @media(max-width:450px){.file-thumb{width:30px;height:30px}}
 .unsupported-preview .button{margin-top:16px}
+.gallery-stage{position:relative;display:flex;align-items:center;justify-content:center;max-width:100%}
+.gallery-prev,.gallery-next{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;background:#ffffffcc;color:#25342e;font-size:19px;line-height:1;box-shadow:0 1px 4px #0003}
+.gallery-prev{left:8px}.gallery-next{right:8px}
+@media(max-width:450px){.gallery-prev,.gallery-next{width:32px;height:32px}}

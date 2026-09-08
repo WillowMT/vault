@@ -27,7 +27,17 @@ function voiceNote(media){
   head.append(label,speed);wrap.append(head,media);return wrap;
 }
 export function bytes(size){if(size===0)return '0 B';const units=['B','KB','MB','GB','TB'],index=Math.min(4,Math.floor(Math.log(size)/Math.log(1024)));return `${Number((size/1024**index).toFixed(index?1:0))} ${units[index]}`;}
-export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
+let gallery=[],galleryKeys=null;
+export function setGallery(entries){gallery=entries;}
+function galleryNav(entry,dir){
+  const index=gallery.findIndex(item=>item.id===entry.id);
+  if(gallery.length<2||index<0)return null;
+  const button=document.createElement('button');button.type='button';button.className=dir<0?'gallery-prev':'gallery-next';
+  button.setAttribute('aria-label',dir<0?'Previous image':'Next image');button.textContent=dir<0?'‹':'›';
+  button.onclick=()=>showPreview(gallery[(index+dir+gallery.length)%gallery.length]);
+  return button;
+}
+export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;if(galleryKeys){dialog.removeEventListener('keydown',galleryKeys);galleryKeys=null;}for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
 export function showPreview(entry){
   clearPreview();const dialog=document.querySelector('#preview-dialog'),content=document.querySelector('#preview-content');
   document.querySelector('#preview-title').textContent=entry.name;document.querySelector('#preview-meta').textContent=`${bytes(entry.size)} · ${entry.mime||'File'}`;
@@ -50,7 +60,19 @@ export function showPreview(entry){
     const media=document.createElement(kind==='image'?'img':kind==='video'?'video':'audio');media.src=url;
     if(kind==='image')media.alt=entry.name;else{media.controls=true;media.preload='metadata';}
     media.onerror=()=>{const p=document.createElement('p');p.textContent='This browser cannot preview this format. You can still download the original.';content.replaceChildren(p);};
-    content.append(kind==='audio'?voiceNote(media):media);
+    if(kind==='image'){
+      const stage=document.createElement('div');stage.className='gallery-stage';stage.append(media);
+      const prev=galleryNav(entry,-1),next=galleryNav(entry,1);
+      if(prev&&next){
+        stage.append(prev,next);
+        galleryKeys=event=>{
+          if(event.key!=='ArrowRight'&&event.key!=='ArrowLeft')return;
+          event.preventDefault();(event.key==='ArrowRight'?next:prev).click();
+        };
+        dialog.addEventListener('keydown',galleryKeys);
+      }
+      content.append(stage);
+    }else content.append(kind==='audio'?voiceNote(media):media);
   }else{
     const panel=document.createElement('div');panel.className='unsupported-preview';panel.append(fileIcon(entry));const p=document.createElement('p');p.textContent='This file is safely stored. Download it to open in its own app.';panel.append(p);content.append(panel);
   }dialog.showModal();

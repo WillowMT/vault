@@ -1,5 +1,5 @@
 import {bootstrap,request,uploadFile,configureLock,shutdown,isUnlocked} from './api.js';
-import {fileCategory,fileIcon,bytes,clearPreview,showPreview} from './preview.js';
+import {fileCategory,fileIcon,bytes,clearPreview,showPreview,setGallery} from './preview.js';
 import {attachThumbnail,revokeThumbnails} from './thumbnails.js';
 const $=selector=>document.querySelector(selector);
 let entries=[],folders=[],parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction;
@@ -7,7 +7,7 @@ const categoryNames={all:'All files',image:'Images',video:'Videos',audio:'Audio'
 function element(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
 function notice(text,error=false){if(!isUnlocked())return;const node=$('#notice');node.textContent=text;node.className=error?'error':'';node.hidden=false;clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{node.hidden=true;},5000);}
 function lockView(){
-  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();entries=[];folders=[];parentId=null;query='';dialogAction=null;
+  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];parentId=null;query='';dialogAction=null;
   for(const dialog of document.querySelectorAll('dialog'))dialog.close();
   const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open SecretCLI in your terminal, then press O to return.'),element('code','npm start'),element('small','This page clears when your CLI session ends.'));
   document.body.replaceChildren(page);document.title='Secret — vault locked';
@@ -39,6 +39,7 @@ function render(){
     return sort==='recent'?new Date(b.createdAt)-new Date(a.createdAt):sort==='size'?b.size-a.size:a.name.localeCompare(b.name,undefined,{numeric:true});
   });
   $('#item-count').textContent=`${filtered.length} ${filtered.length===1?'item':'items'}`;
+  setGallery(filtered.filter(e=>e.kind==='file'&&fileCategory(e)==='image'));
   const container=$('#files');container.replaceChildren();container.className=view==='grid'&&filtered.length?'file-grid':'';
   if(!filtered.length){
     const empty=element('div',undefined,'empty-state');empty.append(element('div',undefined,'empty-art'),element('h2',query?'Nothing by that name.':category!=='all'?'Room for your collection.':parentId?'A fresh folder.':'Your space starts here.'));
