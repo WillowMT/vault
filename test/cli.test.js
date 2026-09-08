@@ -35,15 +35,16 @@ test('status view supports narrow terminals and NO_COLOR style output',()=>{
 test('v1 vault unlocks once then starts browser-required enrollment',async()=>{
   const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
   const output=new PassThrough();let text='';output.on('data',data=>text+=data);
-  const password=Buffer.from('recovery password');let unlocks=0,enrollment;
+  const password=Buffer.from('recovery password');let unlocks=0,enrollment,opened,renewals=0;
   let running;const ready=new Promise(resolve=>{
     running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,passwordReader:async()=>Buffer.from(password),
       prepareVault:async()=>({version:1,close:async()=>{}}),unlockVault:async()=>{unlocks++;return {close:async()=>{}};},
-      startEnrollmentServer:async(vault,recovery)=>{enrollment={vault,recovery:Buffer.from(recovery)};return {origin:'http://localhost:1',launchUrl:'http://localhost:1/',close:async()=>{}};},
+      startEnrollmentServer:async(vault,recovery)=>{enrollment={vault,recovery:Buffer.from(recovery)};return {origin:'http://localhost:1',launchUrl:'http://localhost:1/',renewLaunchUrl(){renewals++;throw new Error('Not enrolled');},close:async()=>{}};},
+      opener:async url=>{opened=url;},
       onReady:resolve});
   });
-  await ready;input.write('q');await running;
-  assert.equal(unlocks,1);assert.ok(enrollment.recovery.equals(password));assert.match(text,/Vault unlocked/);
+  await ready;for(let i=0;!opened&&i<20;i++)await new Promise(resolve=>setTimeout(resolve,1));input.write('l');await new Promise(resolve=>setTimeout(resolve,1));input.write('q');await running;
+  assert.equal(unlocks,1);assert.ok(enrollment.recovery.equals(password));assert.equal(opened,'http://localhost:1/');assert.equal(renewals,0);assert.match(text,/passkey setup required/i);assert.doesNotMatch(text,/Could not create a browser link/);
 });
 test('new vault starts browser-required enrollment with its recovery password',async()=>{
   const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};

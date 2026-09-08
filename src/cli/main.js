@@ -27,12 +27,12 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
   if(config.help){stdout.write('SecretCLI — a local encrypted drive\n\nUsage: secretcli [--vault <directory>] [--no-open]\n\n  --vault     Choose a vault location (default: ~/.secretcli/vault)\n  --no-open   Start without opening the browser automatically\n  --help      Show this help\n\nKeep this terminal running. Ctrl+C locks the vault and stops the website.\n');return;}
   const color=Boolean(stdout.isTTY&&!process.env.NO_COLOR);
   stdout.write(banner(color));
-  const abort=new AbortController();let vault,prepared,app,timer,lines=0,exiting=false,finished,locked=false;
+  const abort=new AbortController();let vault,prepared,app,timer,lines=0,exiting=false,finished,locked=false,enrolling=false;
   const ended=new Promise(resolve=>{finished=resolve;});
   let message='',shutdownPromise;
   function clearPanel(){if(stdout.isTTY&&lines){stdout.write(`\x1b[${lines}A\x1b[J`);lines=0;}}
   const startedAt=Date.now();
-  function draw(){if(exiting||!app)return;clearPanel();const text=renderStatus({origin:app.origin,startedAt,color,width:stdout.columns||80,message,locked});stdout.write(text);lines=text.split('\n').length-1;}
+  function draw(){if(exiting||!app)return;clearPanel();const text=renderStatus({origin:app.origin,startedAt,color,width:stdout.columns||80,message,locked,enrolling});stdout.write(text);lines=text.split('\n').length-1;}
   function stop(){
     if(shutdownPromise)return shutdownPromise;exiting=true;abort.abort();
     shutdownPromise=(async()=>{clearInterval(timer);stdin.off('data',keys);stdin.off('end',stop);stdin.off('close',stop);if(stdin.isTTY)stdin.setRawMode(false);stdin.pause();
@@ -41,7 +41,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
   }
   function signalStop(){void stop().catch(()=>finished());}
   let opening=false,recovering=false;
-  function launchUrl(){return locked?app.launchUrl:app.renewLaunchUrl();}
+  function launchUrl(){return locked||enrolling?app.launchUrl:app.renewLaunchUrl();}
   async function launch(){if(opening||exiting)return;opening=true;try{await opener(launchUrl());message='Browser opened.';}catch{message='Could not open browser. O retry · L link';}finally{opening=false;draw();}}
   async function recover(){if(recovering||!locked||exiting)return;recovering=true;try{const password=await passwordReader({input:stdin,output:stdout,label:'Recovery password',signal:abort.signal});try{const url=await app.recover(password);locked=false;await opener(url);message='Vault recovered and browser opened.';}finally{password.fill(0);}}catch(error){if(!abort.signal.aborted)message='Could not recover. Press R to try again.';}finally{recovering=false;draw();}}
   function keys(data){for(const key of data.toString()){
@@ -58,7 +58,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
     if(exists){
       prepared=await prepare(config.path);
       if(exiting){await prepared.close();return;}
-      if(prepared.version===2){app=await startLocked(prepared);locked=true;}
+      if(prepared.version===2){app=await startLocked(prepared,{onUnlock:()=>{locked=false;message='Vault unlocked.';draw();}});locked=true;}
       else{await prepared.close();prepared=undefined;}
     }
     while(!vault&&!app&&!exiting){
@@ -71,13 +71,12 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
         }
         vault=await busy(stdout,exists?'Unlocking your vault…':'Creating your encrypted vault…',()=>exists?unlock(config.path,password):create(config.path,password));
         const recovery=Buffer.from(password);
-        try{app=await startEnrollment(vault,recovery);}finally{recovery.fill(0);}
+        try{enrolling=true;app=await startEnrollment(vault,recovery,{onEnroll:()=>{enrolling=false;message='Passkey setup complete.';draw();}});}finally{recovery.fill(0);}
       }catch(error){
         if(error.status!==401)throw error;
         stdout.write('  Could not unlock. Check your password and try again.\n\n');await delay(Math.min(++attempts*500,3000),undefined,{signal:abort.signal});
       }finally{password.fill(0);}
     }
-    if(exiting){await app?.close();await vault?.close();return;}
     if(exiting){await app.close();await vault?.close();return;}
     if(stdin.isTTY){stdin.setRawMode(true);stdin.resume();stdin.on('data',keys);stdin.once('end',signalStop);stdin.once('close',signalStop);}
     draw();if(stdout.isTTY)timer=setInterval(draw,60000);
