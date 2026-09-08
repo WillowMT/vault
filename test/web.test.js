@@ -44,7 +44,8 @@ test('enrollment page confirms the registered credential with its PRF result',as
   const confirmed={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(4).buffer,clientDataJSON:Uint8Array.of(5).buffer,signature:Uint8Array.of(6).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
   let gets=0;
   const registration={challenge:'AQI',rp:{id:'localhost',name:'SecretCLI'},user:{id:'BQY',name:'vault',displayName:'Vault'}};
-  const {window,requests}=await unlockPage('enrollment',[registration,{challenge:'AwQ'}],{create:async options=>{assert.equal(options.publicKey.rp.id,'localhost');assert.equal(options.publicKey.user.id.byteLength,2);return registered;},get:async()=>{gets++;return confirmed;}});
+  const confirmation={challenge:'AwQ',allowCredentials:[{id:'AQ',type:'public-key'}]};
+  const {window,requests}=await unlockPage('enrollment',[registration,confirmation],{create:async options=>{assert.equal(options.publicKey.rp.id,'localhost');assert.equal(options.publicKey.user.id.byteLength,2);return registered;},get:async options=>{gets++;assert.equal(options.publicKey.allowCredentials[0].id.byteLength,1);return confirmed;}});
 
   window.document.querySelector('button').click();
   await until(()=>requests.length===3,()=>`Enrollment did not complete: ${requests.length} ${window.document.querySelector('.unlock-message').textContent}`);

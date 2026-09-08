@@ -32,7 +32,7 @@ function buffer(value){
 }
 
 function nativeOptions(value,key='',parent=''){
-  if(Array.isArray(value))return value.map(item=>nativeOptions(item,'',key));
+  if(Array.isArray(value))return value.map(item=>nativeOptions(item,key,parent));
   if(!value||typeof value!=='object'){
     const binary=key==='challenge'||key==='userHandle'||key==='first'||(key==='id'&&['user','allowCredentials','excludeCredentials'].includes(parent));
     return binary&&typeof value==='string'?buffer(value):value;
