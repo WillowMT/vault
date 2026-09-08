@@ -49,3 +49,27 @@ test('HTTP protects data, streams ranges, and expires sessions on shutdown',asyn
   app=await startServer(vault);
   assert.equal((await fetch(url('/api/entries'),{headers:{Cookie:cookie}})).status,401);
 });
+test('PDF and text files serve inline for in-browser preview',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-inline-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('inline preview passphrase'));
+  const app=await startServer(vault);
+  t.after(async()=>{await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const url=path=>app.origin+path;
+  const token=new URL(app.launchUrl).hash.slice(1);
+  const session=await fetch(url('/api/session'),{method:'POST',headers:{Origin:app.origin,'Content-Type':'application/json'},body:JSON.stringify({token})});
+  const cookie=session.headers.get('set-cookie').split(';')[0];
+  const headers={Cookie:cookie};
+  const pdf=await vault.upload(null,'doc.pdf','application/pdf',[Buffer.from('%PDF-1.4 minimal')]);
+  const pdfResponse=await fetch(url(`/api/files/${pdf.id}/content`),{headers});
+  assert.equal(pdfResponse.headers.get('content-type'),'application/pdf');
+  assert.match(pdfResponse.headers.get('content-disposition'),/^inline/);
+  const text=await vault.upload(null,'notes.txt','text/plain',[Buffer.from('hello secret')]);
+  const textResponse=await fetch(url(`/api/files/${text.id}/content`),{headers});
+  assert.equal(textResponse.headers.get('content-type'),'text/plain');
+  assert.match(textResponse.headers.get('content-disposition'),/^inline/);
+  assert.equal(await textResponse.text(),'hello secret');
+  const page=await fetch(url('/'),{headers});
+  const csp=page.headers.get('content-security-policy');
+  assert.match(csp,/frame-src 'self'/);
+  assert.match(csp,/object-src 'none'/);
+});
