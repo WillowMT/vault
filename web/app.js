@@ -39,7 +39,7 @@ function render(){
     return sort==='recent'?new Date(b.createdAt)-new Date(a.createdAt):sort==='size'?b.size-a.size:a.name.localeCompare(b.name,undefined,{numeric:true});
   });
   $('#item-count').textContent=`${filtered.length} ${filtered.length===1?'item':'items'}`;
-  setGallery(filtered.filter(e=>e.kind==='file'&&fileCategory(e)==='image'));
+  setGallery(filtered.filter(e=>e.kind==='file'));
   const container=$('#files');container.replaceChildren();container.className=view==='grid'&&filtered.length?'file-grid':'';
   if(!filtered.length){
     const empty=element('div',undefined,'empty-state');empty.append(element('div',undefined,'empty-art'),element('h2',query?'Nothing by that name.':category!=='all'?'Room for your collection.':parentId?'A fresh folder.':'Your space starts here.'));
