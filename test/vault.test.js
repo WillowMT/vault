@@ -47,6 +47,44 @@ test('folder operations validate collisions, ancestry, and names', async t => {
   assert.throws(()=>vault.stat(file.id),/not found/i);
 });
 
+test('bulk move validates complete selections before changing the catalog', async t => {
+  const {vault}=await fixture(t);
+  const source=await vault.mkdir(null,'Source'), destination=await vault.mkdir(null,'Destination');
+  const one=await vault.upload(source.id,'one.txt','text/plain',[Buffer.from('one')]);
+  const two=await vault.upload(source.id,'two.txt','text/plain',[Buffer.from('two')]);
+  assert.equal(await vault.moveMany([one.id,two.id],destination.id),2);
+  assert.deepEqual(vault.list(destination.id).map(entry=>entry.name).sort(),['one.txt','two.txt']);
+  await assert.rejects(vault.moveMany([one.id,'missing'],null),/not found/i);
+  assert.deepEqual(vault.list(destination.id).map(entry=>entry.name).sort(),['one.txt','two.txt']);
+  await assert.rejects(vault.moveMany([],null),/non-empty/i);
+  await assert.rejects(vault.moveMany([one.id,one.id],null),/unique/i);
+});
+
+test('bulk move rejects selected-name collisions and folder descendant destinations', async t => {
+  const {vault}=await fixture(t);
+  const left=await vault.mkdir(null,'Left'), right=await vault.mkdir(null,'Right'), destination=await vault.mkdir(null,'Destination');
+  const first=await vault.upload(left.id,'same.txt','text/plain',[Buffer.from('first')]);
+  const second=await vault.upload(right.id,'same.txt','text/plain',[Buffer.from('second')]);
+  await assert.rejects(vault.moveMany([first.id,second.id],destination.id),/exists/i);
+  assert.equal(vault.stat(first.id).parentId,left.id);
+  assert.equal(vault.stat(second.id).parentId,right.id);
+  const child=await vault.mkdir(left.id,'Child');
+  await assert.rejects(vault.moveMany([left.id],child.id),/itself|descendant/i);
+  assert.equal(vault.stat(left.id).parentId,null);
+});
+
+test('bulk delete expands overlapping folders and returns the selected count', async t => {
+  const {vault}=await fixture(t);
+  const parent=await vault.mkdir(null,'Parent'), child=await vault.mkdir(parent.id,'Child');
+  const file=await vault.upload(child.id,'secret.txt','text/plain',[Buffer.from('secret')]);
+  assert.equal(await vault.removeMany([parent.id,child.id]),2);
+  assert.throws(()=>vault.stat(parent.id),/not found/i);
+  assert.throws(()=>vault.stat(child.id),/not found/i);
+  assert.throws(()=>vault.stat(file.id),/not found/i);
+  await assert.rejects(vault.removeMany(['missing',file.id]),/not found/i);
+  await assert.rejects(vault.removeMany([]),/non-empty/i);
+});
+
 test('corrupt, reordered, truncated, and appended objects are rejected', async t => {
   const {vault,path} = await fixture(t);
   const file=await vault.upload(null,'test.bin','application/octet-stream',[Buffer.alloc(2*1048576,9)]);

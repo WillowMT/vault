@@ -36,6 +36,13 @@ test('HTTP protects data, streams ranges, and expires sessions on shutdown',asyn
   assert.equal(folderResponse.status,201);const folder=await folderResponse.json();
   const uploaded=await fetch(url(`/api/files?parentId=${folder.id}&name=clip.mp4`),{method:'POST',headers:{...headers,'Content-Type':'video/mp4'},body:'0123456789'});
   assert.equal(uploaded.status,201);const file=await uploaded.json();
+  const second=await vault.upload(null,'second.txt','text/plain',[Buffer.from('two')]);
+  const csrfRejected=await fetch(url('/api/entries/bulk-move'),{method:'POST',headers:{Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify({ids:[file.id],parentId:folder.id})});
+  assert.equal(csrfRejected.status,403);
+  const moved=await fetch(url('/api/entries/bulk-move'),{method:'POST',headers,body:JSON.stringify({ids:[file.id,second.id],parentId:folder.id})});
+  assert.equal(moved.status,200);assert.deepEqual(await moved.json(),{moved:2});
+  const emptyIds=await fetch(url('/api/entries/bulk-delete'),{method:'POST',headers,body:JSON.stringify({ids:[]})});
+  assert.equal(emptyIds.status,400);
   const range=await fetch(url(`/api/files/${file.id}/content`),{headers:{Cookie:cookie,Range:'bytes=2-4'}});
   assert.equal(range.status,206);assert.equal(range.headers.get('content-range'),'bytes 2-4/10');assert.equal(await range.text(),'234');
   assert.equal((await fetch(url(`/api/files/${file.id}/content`),{headers:{Cookie:cookie,Range:'bytes=99-'}})).status,416);
@@ -44,6 +51,8 @@ test('HTTP protects data, streams ranges, and expires sessions on shutdown',asyn
   assert.match(dangerous.headers.get('content-disposition'),/^attachment/);
   assert.equal(dangerous.headers.get('content-type'),'application/octet-stream');
   assert.equal(dangerous.headers.get('cache-control'),'no-store');
+  const deleted=await fetch(url('/api/entries/bulk-delete'),{method:'POST',headers,body:JSON.stringify({ids:[file.id,second.id]})});
+  assert.equal(deleted.status,200);assert.deepEqual(await deleted.json(),{deleted:2});
   const oldOrigin=app.origin;await app.close();
   await assert.rejects(fetch(oldOrigin+'/api/heartbeat'));
   app=await startServer(vault);

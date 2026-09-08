@@ -32,7 +32,12 @@ async function build(path,catalog){
   function active(){if(closing||closed)throw new VaultError('Vault is locked',401);}
   function find(id){const e=entries.find(e=>e.id===id);if(!e)throw new VaultError('File or folder not found',404);return e;}
   function parent(id){if(id!==null&&find(id).kind!=='folder')throw new VaultError('Destination must be a folder');}
-  function unique(parentId,name,except){if(entries.some(e=>e.parentId===parentId&&e.name===name&&e.id!==except))throw new VaultError('A file or folder with this name already exists',409);}
+  function unique(parentId,name,except,ignoredIds){if(entries.some(e=>e.parentId===parentId&&e.name===name&&e.id!==except&&!ignoredIds?.has(e.id)))throw new VaultError('A file or folder with this name already exists',409);}
+  function validateIds(ids){
+    if(!Array.isArray(ids)||ids.length===0)throw new VaultError('Select a non-empty list of entries');
+    if(ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length)throw new VaultError('Selected entry IDs must be unique strings');
+    return ids.map(find);
+  }
   function mutate(fn){
     try{active();}catch(error){return Promise.reject(error);}
     const work=queue.then(async()=>{active();const next=entries.map(e=>({...e}));const value=fn(next);await catalog.save(next);entries=next;return value;});
@@ -63,6 +68,16 @@ async function build(path,catalog){
       for(let p=parentId;p!==null;p=find(p).parentId)if(p===id)throw new VaultError('Cannot move a folder into itself or a descendant');
       Object.assign(next.find(e=>e.id===id),{name,parentId});return publicEntry(next.find(e=>e.id===id));
     });},
+    moveMany(ids,parentId){return mutate(next=>{
+      const selected=validateIds(ids);parent(parentId);const selectedIds=new Set(ids),names=new Set();
+      for(const entry of selected){
+        if(names.has(entry.name))throw new VaultError('A file or folder with this name already exists',409);
+        names.add(entry.name);unique(parentId,entry.name,entry.id,selectedIds);
+        for(let id=parentId;id!==null;id=find(id).parentId)if(id===entry.id)throw new VaultError('Cannot move a folder into itself or a descendant');
+      }
+      for(const entry of selected)next.find(item=>item.id===entry.id).parentId=parentId;
+      return selected.length;
+    });},
     async remove(id){
       const objects=await mutate(next=>{
         find(id);const removed=new Set([id]);let grew=true;
@@ -70,6 +85,16 @@ async function build(path,catalog){
         const objects=next.filter(e=>removed.has(e.id)&&e.kind==='file').map(e=>e.objectId);
         for(let i=next.length-1;i>=0;i--)if(removed.has(next[i].id))next.splice(i,1);return objects;
       });await Promise.all(objects.map(discard));
+    },
+    async removeMany(ids){
+      const objects=await mutate(next=>{
+        const selected=validateIds(ids),removed=new Set(ids);let grew=true;
+        while(grew){grew=false;for(const entry of next)if(removed.has(entry.parentId)&&!removed.has(entry.id)){removed.add(entry.id);grew=true;}}
+        const objects=[...new Set(next.filter(entry=>removed.has(entry.id)&&entry.kind==='file').map(entry=>entry.objectId))];
+        for(let index=next.length-1;index>=0;index--)if(removed.has(next[index].id))next.splice(index,1);
+        return {objects,count:selected.length};
+      });
+      await Promise.all(objects.objects.map(discard));return objects.count;
     },
     async *read(id,start,end){
       active();const e={...find(id)};if(e.kind!=='file')throw new VaultError('Cannot download a folder');

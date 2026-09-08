@@ -43,6 +43,8 @@ export async function startServer(vault){
     if(req.method==='GET'&&path==='/api/heartbeat'){json(res,200,{unlocked:true});return;}
     if(req.method==='GET'&&path==='/api/entries'){json(res,200,{entries:vault.list(url.searchParams.get('parentId')||null,url.searchParams.get('q')||'',{recursive:url.searchParams.get('scope')==='all'}),folders:vault.folders(),summary:vault.summary()});return;}
     if(req.method==='POST'&&path==='/api/folders'){const value=await body(req);json(res,201,await vault.mkdir(value.parentId??null,value.name));return;}
+    if(req.method==='POST'&&path==='/api/entries/bulk-move'){const value=await body(req);json(res,200,{moved:await vault.moveMany(value.ids,value.parentId??null)});return;}
+    if(req.method==='POST'&&path==='/api/entries/bulk-delete'){const value=await body(req);json(res,200,{deleted:await vault.removeMany(value.ids)});return;}
     if(req.method==='POST'&&path==='/api/files'){
       const controller=new AbortController();req.on('aborted',()=>controller.abort());
       req.setTimeout(60000,()=>{controller.abort();req.destroy();});

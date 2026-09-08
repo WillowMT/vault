@@ -2,25 +2,28 @@ import {bootstrap,request,uploadFile,configureLock,shutdown,isUnlocked} from './
 import {fileCategory,fileIcon,bytes,clearPreview,showPreview,setGallery} from './preview.js';
 import {attachThumbnail,revokeThumbnails} from './thumbnails.js';
 const $=selector=>document.querySelector(selector);
-let entries=[],folders=[],parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction;
+let entries=[],folders=[],visibleEntries=[],selected=new Set(),parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction;
 const categoryNames={all:'All files',image:'Images',video:'Videos',audio:'Audio',document:'Documents & other'};
 function element(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
 function notice(text,error=false){if(!isUnlocked())return;const node=$('#notice');node.textContent=text;node.className=error?'error':'';node.hidden=false;clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{node.hidden=true;},5000);}
+function selectedEntries(){return visibleEntries.filter(entry=>selected.has(entry.id));}
+function renderSelection(){const count=selectedEntries().length,all=visibleEntries.length>0&&count===visibleEntries.length,selectAll=$('#select-all');if(!selectAll)return;selectAll.checked=all;selectAll.indeterminate=count>0&&!all;selectAll.disabled=!visibleEntries.length;for(const input of document.querySelectorAll('.entry-select'))input.checked=selected.has(input.dataset.entryId);$('#selection-count').textContent=`${count} selected`;$('#selection-actions').hidden=count===0;$('#bulk-move').disabled=count===0;$('#bulk-delete').disabled=count===0;}
+function clearSelection(){selected.clear();renderSelection();}
 function lockView(){
-  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];parentId=null;query='';dialogAction=null;
+  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];visibleEntries=[];clearSelection();parentId=null;query='';dialogAction=null;
   for(const dialog of document.querySelectorAll('dialog'))dialog.close();
   const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open SecretCLI in your terminal, then press O to return.'),element('code','npm start'),element('small','This page clears when your CLI session ends.'));
   document.body.replaceChildren(page);document.title='Secret — vault locked';
 }
 configureLock(lockView);
 async function load(){
-  const current=++revision;
+  clearSelection();const current=++revision;
   try{const params=new URLSearchParams({parentId:parentId||'',q:query,scope:category==='all'?'folder':'all'});
     const data=await request(`/api/entries?${params}`);
     if(!isUnlocked()||current!==revision)return;entries=data.entries;folders=data.folders;$('#file-count').textContent=data.summary.files;$('#storage-size').textContent=bytes(data.summary.bytes);render();
   }catch(error){if(isUnlocked()&&current===revision){$('#files').setAttribute('aria-busy','false');notice(error.message,true);}}
 }
-function navigate(id){if(!isUnlocked())return;parentId=id;category='all';query='';$('#search').value='';load();}
+function navigate(id){if(!isUnlocked())return;clearSelection();parentId=id;category='all';query='';$('#search').value='';load();}
 function openEntry(entry){if(entry.kind==='folder')navigate(entry.id);else showPreview(entry);}
 function crumb(){
   const target=$('#breadcrumbs');target.replaceChildren();if(!parentId)return;
@@ -38,7 +41,9 @@ function render(){
     if(a.kind!==b.kind)return a.kind==='folder'?-1:1;
     return sort==='recent'?new Date(b.createdAt)-new Date(a.createdAt):sort==='size'?b.size-a.size:a.name.localeCompare(b.name,undefined,{numeric:true});
   });
+  visibleEntries=filtered;
   $('#item-count').textContent=`${filtered.length} ${filtered.length===1?'item':'items'}`;
+  renderSelection();
   setGallery(filtered.filter(e=>e.kind==='file'));
   const container=$('#files');container.replaceChildren();container.className=view==='grid'&&filtered.length?'file-grid':'';
   if(!filtered.length){
@@ -47,9 +52,9 @@ function render(){
     const button=element('button',query?'Clear search':'↑  Upload your first files','button primary');button.onclick=()=>query?($('#search').value='',query='',load()):$('#file-input').click();empty.append(button);
     if(!query)empty.append(element('span','or drag and drop files anywhere','empty-hint'));container.append(empty);return;
   }
-  if(view==='list'){const head=element('div',undefined,'list-head');for(const [text,cls] of [['Name',''],['Type','file-kind'],['Added','file-date'],['Size',''],['','']])head.append(element('span',text,cls));container.append(head);}
+  if(view==='list'){const head=element('div',undefined,'list-head');for(const [text,cls] of [['','entry-select-head'],['Name',''],['Type','file-kind'],['Added','file-date'],['Size',''],['','']])head.append(element('span',text,cls));container.append(head);}
   for(const entry of filtered){
-    const row=element('div',undefined,view==='list'?'file-row':'file-card');const name=element('button',undefined,'file-name');const thumb=view==='grid'&&entry.kind==='file'&&['image','video'].includes(fileCategory(entry))?thumbnailTile(entry):fileIcon(entry);name.append(thumb,element('span',entry.name,'file-name-text'));name.title=entry.name;name.onclick=()=>openEntry(entry);row.append(name);
+    const row=element('div',undefined,view==='list'?'file-row':'file-card'),select=element('input');select.type='checkbox';select.className='entry-select';select.dataset.entryId=entry.id;select.checked=selected.has(entry.id);select.setAttribute('aria-label',`Select ${entry.name}`);select.addEventListener('click',event=>event.stopPropagation());select.addEventListener('change',event=>{if(event.target.checked)selected.add(entry.id);else selected.delete(entry.id);renderSelection();});const name=element('button',undefined,'file-name');const thumb=view==='grid'&&entry.kind==='file'&&['image','video'].includes(fileCategory(entry))?thumbnailTile(entry):fileIcon(entry);name.append(thumb,element('span',entry.name,'file-name-text'));name.title=entry.name;name.onclick=()=>openEntry(entry);row.append(select,name);
     if(view==='list'){row.append(element('span',entry.kind==='folder'?'Folder':fileCategory(entry)==='document'?'File':fileCategory(entry),'file-kind'),element('span',new Date(entry.createdAt).toLocaleDateString(undefined,{month:'short',day:'numeric'}),'file-date'));}
     row.append(element('div',entry.kind==='folder'?'—':bytes(entry.size),'file-size'));
     const menu=element('details',undefined,'file-menu'),summary=element('summary','⋯');summary.setAttribute('aria-label',`Actions for ${entry.name}`);menu.append(summary);
@@ -67,15 +72,18 @@ function dialog({title,description='',fields=[],submit='Save',danger=false,actio
 }
 function nameField(value=''){const label=element('label','Name'),input=element('input');input.id='entry-name';label.htmlFor=input.id;input.value=value;input.required=true;input.autocomplete='off';input.maxLength=255;return [label,input];}
 function rename(entry){dialog({title:'Rename',fields:nameField(entry.name),action:async()=>{await request(`/api/entries/${entry.id}`,{method:'PATCH',body:{name:$('#entry-name').value}});notice('Name updated.');}});}
-function move(entry){
+function destinationField(selectedEntries,value=''){
   const option=(name,value)=>{const node=element('option',name);node.value=value;return node;};
   const select=element('select');select.id='destination';select.setAttribute('aria-label','Destination folder');select.append(option('All files', ''));
-  function descendant(folder){let id=folder.id;const seen=new Set();while(id&&!seen.has(id)){if(id===entry.id)return true;seen.add(id);id=folders.find(f=>f.id===id)?.parentId;}return false;}
+  const selectedFolders=new Set(selectedEntries.filter(entry=>entry.kind==='folder').map(entry=>entry.id));
+  function descendant(folder){let id=folder.id;const seen=new Set();while(id&&!seen.has(id)){if(selectedFolders.has(id))return true;seen.add(id);id=folders.find(f=>f.id===id)?.parentId;}return false;}
   function path(folder){const names=[folder.name];let id=folder.parentId;const seen=new Set();while(id&&!seen.has(id)){seen.add(id);const f=folders.find(f=>f.id===id);if(!f)break;names.unshift(f.name);id=f.parentId;}return names.join(' / ');}
-  for(const folder of folders.filter(f=>!descendant(f)).sort((a,b)=>path(a).localeCompare(path(b))))select.append(option(path(folder),folder.id));select.value=entry.parentId||'';
-  dialog({title:'Move to folder',description:entry.name,fields:[select],submit:'Move',action:async()=>{await request(`/api/entries/${entry.id}`,{method:'PATCH',body:{parentId:select.value||null}});notice('Moved to its new home.');}});
+  for(const folder of folders.filter(f=>!descendant(f)).sort((a,b)=>path(a).localeCompare(path(b))))select.append(option(path(folder),folder.id));select.value=value;return select;
 }
+function move(entry){const select=destinationField([entry],entry.parentId||'');dialog({title:'Move to folder',description:entry.name,fields:[select],submit:'Move',action:async()=>{await request(`/api/entries/${entry.id}`,{method:'PATCH',body:{parentId:select.value||null}});notice('Moved to its new home.');}});}
 function remove(entry){dialog({title:`Delete “${entry.name}”?`,description:entry.kind==='folder'?'This permanently deletes the folder and everything inside. There is no trash or undo.':'This permanently deletes this file from your vault. There is no trash or undo.',submit:'Delete permanently',danger:true,action:async()=>{await request(`/api/entries/${entry.id}`,{method:'DELETE'});notice('Deleted from your vault.');}});}
+function bulkMove(){const entries=selectedEntries(),select=destinationField(entries);dialog({title:'Move selected entries',description:`Move ${entries.length} selected ${entries.length===1?'entry':'entries'} to a folder.`,fields:[select],submit:'Move',action:async()=>{const {moved}=await request('/api/entries/bulk-move',{method:'POST',body:{ids:entries.map(entry=>entry.id),parentId:select.value||null}});clearSelection();notice(`Moved ${moved} ${moved===1?'entry':'entries'}.`);}});}
+function bulkDelete(){const entries=selectedEntries(),folders=entries.filter(entry=>entry.kind==='folder').length,warning=folders?` Selected folder${folders===1?'':'s'} and everything inside will be permanently deleted.`:' This permanently deletes the selected files from your vault.';dialog({title:'Delete selected entries?',description:`${entries.length} selected ${entries.length===1?'entry':'entries'}.${warning} There is no trash or undo.`,submit:'Delete permanently',danger:true,action:async()=>{const {deleted}=await request('/api/entries/bulk-delete',{method:'POST',body:{ids:entries.map(entry=>entry.id)}});clearSelection();notice(`Deleted ${deleted} ${deleted===1?'entry':'entries'} from your vault.`);}});}
 let uploadQueue=Promise.resolve();
 function upload(files){
   if(!isUnlocked())return;const destination=parentId;
@@ -94,10 +102,11 @@ $('#new-folder').onclick=()=>dialog({title:'New folder',fields:nameField(),submi
 $('#action-form').onsubmit=async event=>{event.preventDefault();$('#dialog-submit').disabled=true;try{await dialogAction();if(isUnlocked()){$('#action-dialog').close();dialogAction=null;await load();}}catch(error){if(isUnlocked())$('#dialog-error').textContent=error.message;}finally{if(isUnlocked())$('#dialog-submit').disabled=false;}};
 for(const id of ['#dialog-close','#dialog-cancel'])$(id).onclick=()=>$('#action-dialog').close();
 $('#preview-close').onclick=clearPreview;$('#preview-dialog').addEventListener('cancel',event=>{event.preventDefault();clearPreview();});
-$('#sort').onchange=event=>{sort=event.target.value;render();};
-for(const mode of ['list','grid'])$(`#${mode}-view`).onclick=()=>{view=mode;for(const m of ['list','grid']){$(`#${m}-view`).classList.toggle('selected',m===view);$(`#${m}-view`).setAttribute('aria-pressed',String(m===view));}render();};
-for(const button of document.querySelectorAll('[data-category]'))button.onclick=()=>{if(!isUnlocked())return;category=button.dataset.category;parentId=null;query='';$('#search').value='';load();};
-$('#search').oninput=event=>{query=event.target.value.trim();clearTimeout(searchTimer);searchTimer=setTimeout(load,180);};
+$('#select-all').onchange=event=>{if(event.target.checked)for(const entry of visibleEntries)selected.add(entry.id);else clearSelection();renderSelection();};$('#bulk-move').onclick=bulkMove;$('#bulk-delete').onclick=bulkDelete;$('#clear-selection').onclick=clearSelection;
+$('#sort').onchange=event=>{clearSelection();sort=event.target.value;render();};
+for(const mode of ['list','grid'])$(`#${mode}-view`).onclick=()=>{clearSelection();view=mode;for(const m of ['list','grid']){$(`#${m}-view`).classList.toggle('selected',m===view);$(`#${m}-view`).setAttribute('aria-pressed',String(m===view));}render();};
+for(const button of document.querySelectorAll('[data-category]'))button.onclick=()=>{if(!isUnlocked())return;clearSelection();category=button.dataset.category;parentId=null;query='';$('#search').value='';load();};
+$('#search').oninput=event=>{clearSelection();query=event.target.value.trim();clearTimeout(searchTimer);searchTimer=setTimeout(load,180);};
 document.addEventListener('keydown',event=>{if(!isUnlocked())return;if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!$('dialog[open]')){event.preventDefault();$('#search').focus();}if(event.key==='Escape')for(const menu of document.querySelectorAll('.file-menu[open]'))menu.open=false;});
 document.addEventListener('click',event=>{for(const menu of document.querySelectorAll('.file-menu[open]'))if(!menu.contains(event.target))menu.open=false;});
 document.addEventListener('dragenter',event=>{if(!isUnlocked()||!event.dataTransfer.types.includes('Files'))return;event.preventDefault();dragDepth++;$('#drop-overlay').hidden=false;});
@@ -106,5 +115,5 @@ document.addEventListener('dragleave',()=>{if(!isUnlocked())return;if(--dragDept
 document.addEventListener('drop',event=>{event.preventDefault();if(!isUnlocked())return;dragDepth=0;$('#drop-overlay').hidden=true;upload([...event.dataTransfer.files]);});
 async function heartbeat(){if(!isUnlocked())return;try{const response=await fetch('/api/heartbeat',{cache:'no-store',signal:AbortSignal.timeout(2000)});if(!response.ok)lockView();}catch{lockView();}}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)heartbeat();});
-window.addEventListener('pagehide',()=>{clearPreview();});
+window.addEventListener('pagehide',()=>{clearPreview();clearSelection();});
 try{await bootstrap();await load();if(isUnlocked())heartbeatTimer=setInterval(heartbeat,2000);}catch{lockView();}
