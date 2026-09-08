@@ -24,6 +24,10 @@ Use Node.js 24 or newer. macOS is the initial target.
 
 There is no build, lint, or formatting command configured. Press `Ctrl+C` to stop the server and lock the vault.
 
+## Global CLI Installation
+
+The `secretcli` command is installed globally via `npm link`, which symlinks the global bin into this project so code changes are live immediately without reinstalling. If the command is missing or stale (typically after switching Node versions via mise, which keeps links per Node install), re-run `npm link` in this directory. Verify with `which secretcli` (should resolve through `../lib/node_modules/secretcli` to this repo) and `secretcli --help`.
+
 ## Coding Style & Naming Conventions
 
 Use ESM imports, explicit `.js` extensions, two-space indentation, single-quoted JavaScript strings, and semicolons. Prefer `camelCase` functions and variables, `PascalCase` classes, and descriptive lowercase filenames. Keep modules focused and preserve existing interfaces. Render user-supplied filenames with `textContent`, never HTML interpolation.
