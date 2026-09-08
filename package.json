@@ -1,0 +1,20 @@
+{
+  "name": "secretcli",
+  "version": "0.1.0",
+  "description": "A local encrypted drive, unlocked from your terminal",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "secretcli": "bin/secretcli.js"
+  },
+  "scripts": {
+    "start": "node bin/secretcli.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.14.0"
+  }
+}

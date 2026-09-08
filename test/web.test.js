@@ -1,0 +1,39 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { Browser } from 'happy-dom';
+import { mkdtemp,rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createVault } from '../src/vault/vault.js';
+import { startServer } from '../src/server/server.js';
+async function until(fn,message){for(let i=0;i<150;i++){if(fn())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error(typeof message==='function'?message():message);}
+test('browser UI creates folders, uploads, searches, renames, moves and clears on disconnect',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-web-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('browser test passphrase'));
+  const app=await startServer(vault);
+  // Only our own local app code runs here, never uploaded file content.
+  // Happy DOM omits Origin on same-origin POSTs; real browsers supply it.
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelector('#item-count')?.textContent==='0 items',()=>`App did not initialize: ${page.virtualConsolePrinter.readAsString()} ${doc.body.textContent.slice(-500)}`);
+  assert.equal(page.url.includes('#'),false);
+  doc.querySelector('#new-folder').click();doc.querySelector('#entry-name').value='Pictures';doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>doc.querySelector('.file-name-text')?.textContent==='Pictures','Folder did not appear');
+  const input=doc.querySelector('#file-input');const transfer=new window.DataTransfer();transfer.items.add(new window.File(['test image'],'photo.png',{type:'image/png'}));input.files=transfer.files;input.dispatchEvent(new window.Event('change'));
+  await until(()=>[...doc.querySelectorAll('.file-name-text')].some(n=>n.textContent==='photo.png'),'Upload did not finish');
+  const row=[...doc.querySelectorAll('.file-row')].find(n=>n.textContent.includes('photo.png'));
+  [...row.querySelectorAll('button')].find(n=>n.textContent==='Rename').click();doc.querySelector('#entry-name').value='renamed.png';doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{cancelable:true}));
+  await until(()=>[...doc.querySelectorAll('.file-name-text')].some(n=>n.textContent==='renamed.png'),'Rename failed');
+  const renamed=[...doc.querySelectorAll('.file-row')].find(n=>n.textContent.includes('renamed.png'));
+  [...renamed.querySelectorAll('button')].find(n=>n.textContent==='Move to folder').click();const select=doc.querySelector('#destination');select.value=[...select.options].find(o=>o.textContent==='Pictures').value;doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{cancelable:true}));
+  await until(()=>doc.querySelectorAll('.file-row').length===1,'Move failed');
+  const search=doc.querySelector('#search');search.value='renamed';search.dispatchEvent(new window.Event('input'));
+  await until(()=>doc.querySelector('.file-name-text')?.textContent==='renamed.png','Global filename search failed');
+  doc.querySelector('#grid-view').click();assert.ok(doc.querySelector('.file-card'));
+  await app.close();
+  await until(()=>doc.querySelector('.locked-page'),'View did not clear on disconnect');
+  assert.equal(doc.body.textContent.includes('renamed.png'),false);assert.equal(doc.body.textContent.includes('Pictures'),false);
+  assert.equal(page.virtualConsolePrinter.readAsString().includes('TypeError'),false);
+});

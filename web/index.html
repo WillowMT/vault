@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Secret — your private drive</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Secret home"><span class="brand-mark">◇</span> secret<span class="brand-period">.</span></a>
+    <div class="vault-badge"><span class="status-dot"></span><span>Private vault</span><span class="badge-local">Local</span></div>
+    <nav class="side-nav" aria-label="File categories">
+      <button class="nav-item active" data-category="all"><span aria-hidden="true">▦</span> All files <span id="file-count" class="nav-count">0</span></button>
+      <button class="nav-item" data-category="image"><span aria-hidden="true">▧</span> Images</button>
+      <button class="nav-item" data-category="video"><span aria-hidden="true">▷</span> Videos</button>
+      <button class="nav-item" data-category="audio"><span aria-hidden="true">♫</span> Audio</button>
+      <button class="nav-item" data-category="document"><span aria-hidden="true">▤</span> Documents & other</button>
+    </nav>
+    <div class="sidebar-note"><span class="tiny-diamond">◇</span><p>Yours to keep.<br>Yours to unlock.</p></div>
+    <div class="storage"><div><span>Encrypted storage</span><strong id="storage-size">0 B</strong></div><p>Stored only on this computer</p></div>
+    <div class="session-note"><span class="status-dot"></span><div>CLI session active<small>Close your terminal to lock</small></div></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="topbar-label">Your private space</div><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your files" aria-label="Search your files" autocomplete="off"><kbd>/</kbd></label><span class="local-indicator">On this computer <span aria-hidden="true">↗</span></span></header>
+    <main id="main">
+      <div class="page-heading"><div><nav id="breadcrumbs" aria-label="Folder breadcrumb"></nav><h1 id="page-title">All files</h1><p id="page-description">Everything you keep, kept private.</p></div><div class="heading-actions"><button id="new-folder" class="button secondary"><span aria-hidden="true">＋</span> New folder</button><button id="upload" class="button primary"><span aria-hidden="true">↑</span> Upload files</button><input id="file-input" type="file" multiple hidden></div></div>
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <section id="uploads" aria-label="Upload progress" hidden></section>
+      <div class="file-toolbar"><span id="item-count">Opening your vault…</span><div class="toolbar-right"><label class="sort-label">Sort <select id="sort" aria-label="Sort files"><option value="name">Name</option><option value="recent">Newest first</option><option value="size">Largest first</option></select></label><div class="view-switch" aria-label="File view"><button id="list-view" class="selected" aria-label="List view" aria-pressed="true">☰</button><button id="grid-view" aria-label="Grid view" aria-pressed="false">▦</button></div></div></div>
+      <section id="files" aria-label="Files" aria-busy="true"></section>
+      <footer class="workspace-footer"><span>◇ Encrypted at rest. Unlocked just for you.</span><span>secretcli</span></footer>
+    </main>
+  </div>
+  <div id="drop-overlay" hidden><div><span>↓</span><h2>A safe place to land.</h2><p>Drop files to encrypt and store them.</p></div></div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title"><form id="action-form"><div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" id="dialog-close" aria-label="Close dialog">×</button></div><p id="dialog-description"></p><div id="dialog-fields"></div><p id="dialog-error" role="alert"></p><div class="dialog-actions"><button type="button" class="button secondary" id="dialog-cancel">Cancel</button><button type="submit" class="button primary" id="dialog-submit">Save</button></div></form></dialog>
+  <dialog id="preview-dialog" aria-labelledby="preview-title"><div class="dialog-heading"><div><h2 id="preview-title"></h2><p id="preview-meta"></p></div><button class="icon-button" id="preview-close" aria-label="Close preview">×</button></div><div id="preview-content"></div><div class="preview-footer"><span>Downloads are saved outside your encrypted vault.</span><a id="preview-download" class="button primary">↓ Download</a></div></dialog>
+</body>
+</html>

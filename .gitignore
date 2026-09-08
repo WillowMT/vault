@@ -1,0 +1,5 @@
+node_modules/
+.secretcli/
+coverage/
+*.partial
+.DS_Store
