@@ -37,3 +37,38 @@ test('browser UI creates folders, uploads, searches, renames, moves and clears o
   assert.equal(doc.body.textContent.includes('renamed.png'),false);assert.equal(doc.body.textContent.includes('Pictures'),false);
   assert.equal(page.virtualConsolePrinter.readAsString().includes('TypeError'),false);
 });
+test('preview dialog renders pdf, text, and voice-note players',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-preview-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('preview test passphrase'));
+  const app=await startServer(vault);
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelector('#item-count')?.textContent==='0 items','App did not initialize');
+  const input=doc.querySelector('#file-input');
+  const transfer=new window.DataTransfer();
+  transfer.items.add(new window.File(['%PDF-1.4 minimal'],'doc.pdf',{type:'application/pdf'}));
+  transfer.items.add(new window.File(['hello secret vault'],'notes.txt',{type:'text/plain'}));
+  transfer.items.add(new window.File(['fake audio'],'voice.mp3',{type:'audio/mpeg'}));
+  input.files=transfer.files;input.dispatchEvent(new window.Event('change'));
+  await until(()=>doc.querySelectorAll('.file-row').length===3,'Uploads did not finish');
+  async function open(name){const row=[...doc.querySelectorAll('.file-row')].find(n=>n.textContent.includes(name));[...row.querySelectorAll('button')].find(n=>n.textContent==='Preview').click();await until(()=>doc.querySelector('#preview-dialog[open]'),`${name} preview did not open`);}
+  await open('doc.pdf');
+  const frame=doc.querySelector('#preview-content iframe.pdf-frame');
+  assert.ok(frame,'PDF iframe missing');assert.ok(frame.src.includes('/content'),'PDF iframe src wrong');
+  doc.querySelector('#preview-close').click();
+  await open('notes.txt');
+  const pre=await (async()=>{for(let i=0;i<150;i++){const node=doc.querySelector('#preview-content pre.text-preview');if(node?.textContent==='hello secret vault')return node;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('Text preview did not load');})();
+  assert.ok(pre,'Text preview missing');
+  doc.querySelector('#preview-close').click();
+  await open('voice.mp3');
+  const player=doc.querySelector('#preview-content .voice-note');
+  assert.ok(player?.querySelector('audio'),'Voice-note player missing');
+  const speed=player.querySelector('.voice-speed');
+  assert.equal(speed.textContent,'1×');
+  speed.click();assert.equal(player.querySelector('audio').playbackRate,1.25);
+  speed.click();assert.equal(player.querySelector('audio').playbackRate,1.5);
+  doc.querySelector('#preview-close').click();
+  assert.equal(page.virtualConsolePrinter.readAsString().includes('TypeError'),false);
+});
