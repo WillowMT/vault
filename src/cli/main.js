@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createVault,unlockVault,prepareVault } from '../vault/vault.js';
+import { exportVault,importVault } from '../vault/archive.js';
 import { loadRegistry,saveRegistry,resolveReference,registerVault,touchVault,forgetVault } from '../vault/registry.js';
 import { startLockedServer,startEnrollmentServer } from '../server/server.js';
 import { readPassword,readText } from './prompt.js';
@@ -86,12 +87,57 @@ async function rememberVault(registryPath,registry,path,forceRegister){
   return registry;
 }
 
+function formatBytes(size){
+  if(!size)return '0 B';
+  const units=['B','KB','MB','GB','TB'],index=Math.min(4,Math.floor(Math.log(size)/Math.log(1024)));
+  return `${(size/1024**index).toFixed(index?1:0)} ${units[index]}`;
+}
+
+async function defaultVaultPath(registryPath){
+  const {registry}=await loadRegistry(registryPath);
+  const mostRecent=[...registry.vaults].sort((first,second)=>(second.lastOpenedAt??0)-(first.lastOpenedAt??0))[0];
+  return mostRecent?.path;
+}
+
+async function resolveVaultLocation(reference,registryPath){
+  const {registry}=await loadRegistry(registryPath);
+  const entry=resolveReference(registry,reference);
+  return entry?entry.path:resolve(reference);
+}
+
+async function exportCommand({config,stdout,registryPath}){
+  if(config.help){stdout.write('Usage: secretcli export [--vault <name|directory>] --to <archive.scvault>\n\n  Export a vault to a single encrypted archive file. The vault must not be open.\n  The archive contains only encrypted data and needs no password to store.\n');return;}
+  if(!config.to)throw new Error('secretcli export needs --to <archive.scvault>');
+  const directory=config.vault?await resolveVaultLocation(config.vault,registryPath):await defaultVaultPath(registryPath);
+  if(!directory)throw new Error('No vaults registered. Open a vault first, or pass --vault <directory>.');
+  const output=resolve(config.to);
+  const {manifest,bytes}=await exportVault({directory,output});
+  stdout.write(`  Exported ${manifest.files.length} files (${formatBytes(bytes)}) to ${output}\n  The archive is ciphertext-only — store it anywhere.\n`);
+}
+
+async function importCommand({config,stdout,registryPath}){
+  if(config.help){stdout.write('Usage: secretcli import <archive.scvault> --out <directory> [--name <name>]\n\n  Restore an exported archive into a new vault directory and register it.\n  Unlock the restored vault with the original recovery password or passkey.\n');return;}
+  if(!config.positional[0])throw new Error('Usage: secretcli import <archive.scvault> --out <directory> [--name <name>]');
+  if(!config.out)throw new Error('secretcli import needs --out <directory>');
+  const archive=resolve(config.positional[0]),directory=resolve(config.out);
+  const {manifest}=await importVault({archive,directory});
+  stdout.write(`  Imported ${manifest.files.length} files into ${directory}\n`);
+  try{
+    const {registry}=await loadRegistry(registryPath);
+    const {registry:updated,entry}=await registerVault(registry,directory,config.name);
+    await saveRegistry(registryPath,updated);
+    stdout.write(`  Registered as “${entry.name}”. Open it with: secretcli --vault ${entry.name}\n`);
+  }catch(error){
+    stdout.write(`  ⚠ The vault could not be registered in your vault list: ${error.message}\n`);
+  }
+}
+
 export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout=process.stdout,stderr=process.stderr,passwordReader=readPassword,opener=openBrowser,onReady,createVault:create=createVault,unlockVault:unlock=unlockVault,prepareVault:prepare=prepareVault,startLockedServer:startLocked=startLockedServer,startEnrollmentServer:startEnrollment=startEnrollmentServer,registryPath=REGISTRY_DEFAULT}={}){
   const config=parseArgs(argv);
   if(config.mode==='vaults')return vaultsCommand({config,stdout,registryPath});
-  if(config.mode==='export')throw new Error('secretcli export is not available yet');
-  if(config.mode==='import')throw new Error('secretcli import is not available yet');
-  if(config.help){stdout.write('SecretCLI — a local encrypted drive\n\nUsage: secretcli [--vault <name|directory>] [--no-open]\n       secretcli vaults [--add <path> [name]] [--remove <name>]\n\n  --vault     Open a vault by list name or directory (omit to pick from your vaults)\n  --no-open   Start without opening the browser automatically\n  --help      Show this help\n\n  vaults      Manage your vault list\n\nKeep this terminal running. Ctrl+C locks the vault and stops the website.\n');return;}
+  if(config.mode==='export')return exportCommand({config,stdout,registryPath});
+  if(config.mode==='import')return importCommand({config,stdout,registryPath});
+  if(config.help){stdout.write('SecretCLI — a local encrypted drive\n\nUsage: secretcli [--vault <name|directory>] [--no-open]\n       secretcli vaults [--add <path> [name]] [--remove <name>]\n       secretcli export [--vault <name|directory>] --to <archive.scvault>\n       secretcli import <archive.scvault> --out <directory> [--name <name>]\n\n  --vault     Open a vault by list name or directory (omit to pick from your vaults)\n  --no-open   Start without opening the browser automatically\n  --help      Show this help\n\n  vaults      Manage your vault list\n  export      Copy a vault into one encrypted archive file\n  import      Restore an archive into a new vault\n\nKeep this terminal running. Ctrl+C locks the vault and stops the website.\n');return;}
   const color=Boolean(stdout.isTTY&&!process.env.NO_COLOR);
   stdout.write(banner(color));
   const abort=new AbortController();let vault,prepared,app,timer,lines=0,exiting=false,finished,locked=false,enrolling=false;
