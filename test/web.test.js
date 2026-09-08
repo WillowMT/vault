@@ -32,6 +32,8 @@ test('browser UI creates folders, uploads, searches, renames, moves and clears o
   const search=doc.querySelector('#search');search.value='renamed';search.dispatchEvent(new window.Event('input'));
   await until(()=>doc.querySelector('.file-name-text')?.textContent==='renamed.png','Global filename search failed');
   doc.querySelector('#grid-view').click();assert.ok(doc.querySelector('.file-card'));
+  const card=[...doc.querySelectorAll('.file-card')].find(n=>n.textContent.includes('renamed.png'));
+  assert.ok(card?.querySelector('.file-thumb .file-icon'),'Grid card lacks thumbnail tile with icon fallback');
   await app.close();
   await until(()=>doc.querySelector('.locked-page'),'View did not clear on disconnect');
   assert.equal(doc.body.textContent.includes('renamed.png'),false);assert.equal(doc.body.textContent.includes('Pictures'),false);

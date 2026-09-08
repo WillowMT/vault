@@ -6,7 +6,7 @@ import { createSession } from './session.js';
 import { headers,checkRequest,contentType,disposition } from './security.js';
 import { parseRange } from './ranges.js';
 import { VaultError } from '../vault/format.js';
-const assets=new Map([['/','index.html'],['/styles.css','styles.css'],['/app.js','app.js'],['/api.js','api.js'],['/preview.js','preview.js']]);
+const assets=new Map([['/','index.html'],['/styles.css','styles.css'],['/app.js','app.js'],['/api.js','api.js'],['/preview.js','preview.js'],['/thumbnails.js','thumbnails.js']]);
 function json(res,status,body){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(body));}
 async function body(req){
   let length=0;const parts=[];

@@ -1,12 +1,13 @@
 import {bootstrap,request,uploadFile,configureLock,shutdown,isUnlocked} from './api.js';
 import {fileCategory,fileIcon,bytes,clearPreview,showPreview} from './preview.js';
+import {attachThumbnail,revokeThumbnails} from './thumbnails.js';
 const $=selector=>document.querySelector(selector);
 let entries=[],folders=[],parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction;
 const categoryNames={all:'All files',image:'Images',video:'Videos',audio:'Audio',document:'Documents & other'};
 function element(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
 function notice(text,error=false){if(!isUnlocked())return;const node=$('#notice');node.textContent=text;node.className=error?'error':'';node.hidden=false;clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{node.hidden=true;},5000);}
 function lockView(){
-  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();entries=[];folders=[];parentId=null;query='';dialogAction=null;
+  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();entries=[];folders=[];parentId=null;query='';dialogAction=null;
   for(const dialog of document.querySelectorAll('dialog'))dialog.close();
   const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open SecretCLI in your terminal, then press O to return.'),element('code','npm start'),element('small','This page clears when your CLI session ends.'));
   document.body.replaceChildren(page);document.title='Secret — vault locked';
@@ -27,6 +28,7 @@ function crumb(){
   const root=element('button','All files');root.onclick=()=>navigate(null);target.append(root);
   for(const f of trail){target.append(element('span','/'));const button=element('button',f.name);button.onclick=()=>navigate(f.id);target.append(button);}
 }
+function thumbnailTile(entry){const tile=element('span',undefined,'file-thumb');attachThumbnail(tile,entry);return tile;}
 function render(){
   $('#files').setAttribute('aria-busy','false');crumb();
   $('#page-title').textContent=query?'Search results':parentId?(folders.find(f=>f.id===parentId)?.name||'Folder'):categoryNames[category];
@@ -46,7 +48,7 @@ function render(){
   }
   if(view==='list'){const head=element('div',undefined,'list-head');for(const [text,cls] of [['Name',''],['Type','file-kind'],['Added','file-date'],['Size',''],['','']])head.append(element('span',text,cls));container.append(head);}
   for(const entry of filtered){
-    const row=element('div',undefined,view==='list'?'file-row':'file-card');const name=element('button',undefined,'file-name');name.append(fileIcon(entry),element('span',entry.name,'file-name-text'));name.title=entry.name;name.onclick=()=>openEntry(entry);row.append(name);
+    const row=element('div',undefined,view==='list'?'file-row':'file-card');const name=element('button',undefined,'file-name');const thumb=view==='grid'&&entry.kind==='file'&&['image','video'].includes(fileCategory(entry))?thumbnailTile(entry):fileIcon(entry);name.append(thumb,element('span',entry.name,'file-name-text'));name.title=entry.name;name.onclick=()=>openEntry(entry);row.append(name);
     if(view==='list'){row.append(element('span',entry.kind==='folder'?'Folder':fileCategory(entry)==='document'?'File':fileCategory(entry),'file-kind'),element('span',new Date(entry.createdAt).toLocaleDateString(undefined,{month:'short',day:'numeric'}),'file-date'));}
     row.append(element('div',entry.kind==='folder'?'—':bytes(entry.size),'file-size'));
     const menu=element('details',undefined,'file-menu'),summary=element('summary','⋯');summary.setAttribute('aria-label',`Actions for ${entry.name}`);menu.append(summary);
