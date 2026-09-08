@@ -2,12 +2,20 @@
 
 A local encrypted drive that opens from your terminal. Requires Node.js 24 or newer. No runtime dependencies or hosted services.
 
-## Start
+## Install
 
-From this project directory:
+Requires Node.js 24 or newer and macOS (Touch ID passkey unlock needs a Mac with Touch ID; other platforms have not been verified).
 
 ```sh
-npm start
+npm install -g secretcli
+```
+
+## Start
+
+Run:
+
+```sh
+secretcli
 ```
 
 On first launch, choose and confirm a password of at least 12 characters. The default vault is `~/.secretcli/vault`. Later launches ask for that password before starting the website and opening your browser.
@@ -15,18 +23,22 @@ On first launch, choose and confirm a password of at least 12 characters. The de
 Keep the CLI running. **Ctrl+C locks the vault and stops the website.** Press **O** to reopen the browser or **L** to display a fresh one-use launch link. The plain local address alone does not authenticate a browser.
 
 ```sh
-node bin/secretcli.js --vault /path/to/my-vault
-node bin/secretcli.js --no-open
-node bin/secretcli.js --help
+secretcli --vault /path/to/my-vault
+secretcli --no-open
+secretcli --help
 ```
 
-The target directory must not already exist when creating a vault. The application is intended for macOS; other platforms have not been verified.
+The target directory must not already exist when creating a vault.
 
 ## Files
 
 Create folders, upload any file type, search filenames, rename, move, download, and permanently delete files. List and grid views and media categories are available. Supported browser image, audio, and video formats preview in the app. PDFs and unsupported formats download to open in another viewer. Upload folders by creating the folder in the app and adding its files.
 
 File contents, names, folder structure, and metadata are encrypted. Files stream in authenticated 1 MiB chunks, including when seeking in large media. Limits: 1 TiB per file, two concurrent server uploads, and a 32 MiB metadata catalog. The browser queues uploads sequentially.
+
+## Passkey unlock
+
+New vaults enroll a passkey during setup. After locking, relaunching presents a browser prompt to unlock with Touch ID instead of typing the password. The recovery password always works from the terminal (press **R** at the passkey prompt). Enrollment is per vault and stored inside the encrypted metadata; removing the vault removes the passkey's usefulness.
 
 ## Locking and recovery
 

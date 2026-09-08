@@ -2,22 +2,39 @@
   "name": "secretcli",
   "version": "0.1.0",
   "description": "A local encrypted drive, unlocked from your terminal",
+  "license": "MIT",
+  "author": "WillowMT",
   "type": "module",
-  "private": true,
   "engines": {
     "node": ">=24"
   },
   "bin": {
     "secretcli": "bin/secretcli.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "web",
+    "docs/vault-format.md"
+  ],
+  "keywords": [
+    "encryption",
+    "encrypted-drive",
+    "vault",
+    "cli",
+    "security",
+    "passkey",
+    "webauthn",
+    "local-first"
+  ],
   "scripts": {
     "start": "node bin/secretcli.js",
     "test": "node --test test/*.test.js"
   },
-  "devDependencies": {
-    "happy-dom": "^20.14.0"
-  },
   "dependencies": {
     "@simplewebauthn/server": "^13.3.0"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.14.0"
   }
 }
