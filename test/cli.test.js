@@ -71,13 +71,67 @@ test('v2 starts locked without a password prompt and R recovers into a fresh bro
   const output=new PassThrough();let prompts=0,recovery,opened;
   const app={origin:'http://localhost:1',launchUrl:'http://localhost:1/',recover:async password=>{recovery=Buffer.from(password);return 'http://localhost:1/#fresh';},close:async()=>{}};
   let running;const ready=new Promise(resolve=>{
-    running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,passwordReader:async()=>{prompts++;return Buffer.from('recovery password');},opener:async url=>{opened=url;},
+    running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,passwordReader:async()=>{prompts++;return Buffer.from('recovery password');},textReader:async()=>Buffer.from('p'),opener:async url=>{opened=url;},
       prepareVault:async()=>({version:2,close:async()=>{}}),startLockedServer:async()=>app,onReady:resolve});
   });
   await ready;assert.equal(prompts,0);input.write('r');
   for(let i=0;!opened&&i<20;i++)await new Promise(resolve=>setTimeout(resolve,1));
   input.write('q');await running;
   assert.equal(prompts,1);assert.equal(recovery.toString(),'recovery password');assert.equal(opened,'http://localhost:1/#fresh');
+});
+test('disabled v3 unlocks from a selected recovery image and starts ready mode',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-image-cli-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const imagePath=join(root,'recovery.png'),image=Buffer.from('recovery image');
+  await writeFile(imagePath,image);
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  const output=new PassThrough();let received,startedVault,lockedStarts=0,prompts=0;
+  const vault={close:async()=>{}};
+  const answers=[Buffer.from('f'),Buffer.from(imagePath)];
+  let running;const ready=new Promise(resolve=>{
+    running=run({argv:['--vault',root],stdin:input,stdout:output,passwordReader:async()=>{prompts++;return Buffer.from('unused');},textReader:async()=>answers.shift(),
+      prepareVault:async()=>({version:3,passkey:null,unlockWithRecoveryImage:async value=>{received=Buffer.from(value);return vault;},close:async()=>{}}),
+      startLockedServer:async()=>{lockedStarts++;},startServer:async value=>{startedVault=value;return {origin:'http://localhost:1',launchUrl:'http://localhost:1/#ready',renewLaunchUrl:()=>'',close:async()=>{}};},
+      opener:async()=>{},onReady:resolve});
+  });
+  await ready;input.write('q');await running;
+  assert.deepEqual(received,image);assert.equal(startedVault,vault);assert.equal(lockedStarts,0);assert.equal(prompts,0);
+});
+test('disabled v3 uses the native recovery file picker before asking for a path',async()=>{
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  const output=new PassThrough();const vault={close:async()=>{}};let received,pickerCalls=0,pathPrompts=0;
+  let running;const ready=new Promise(resolve=>{
+    running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,textReader:async()=>{pathPrompts++;return Buffer.from('f');},recoveryFilePicker:async()=>{pickerCalls++;return '/tmp/recovery.png';},
+      readRecoveryFile:async()=>({image:Buffer.from('picked'),storage:Buffer.alloc(6)}),prepareVault:async()=>({version:3,passkey:null,unlockWithRecoveryImage:async value=>{received=Buffer.from(value);return vault;},close:async()=>{}}),
+      startServer:async()=>({origin:'http://localhost:1',launchUrl:'http://localhost:1/',renewLaunchUrl:()=>'',close:async()=>{}}),opener:async()=>{},onReady:resolve});
+  });
+  await ready;input.write('q');await running;
+  assert.equal(pickerCalls,1);assert.equal(pathPrompts,1);assert.equal(received.toString(),'picked');
+});
+test('disabled v3 unlocks from the hidden recovery password and starts ready mode',async()=>{
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  const output=new PassThrough();let received,startedVault;
+  const vault={close:async()=>{}};
+  let running;const ready=new Promise(resolve=>{
+    running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,textReader:async()=>Buffer.from('p'),passwordReader:async()=>Buffer.from('recovery password'),
+      prepareVault:async()=>({version:3,passkey:null,unlockWithPassword:async value=>{received=Buffer.from(value);return vault;},close:async()=>{}}),
+      startServer:async value=>{startedVault=value;return {origin:'http://localhost:1',launchUrl:'http://localhost:1/#ready',renewLaunchUrl:()=>'',close:async()=>{}};},
+      opener:async()=>{},onReady:resolve});
+  });
+  await ready;input.write('q');await running;
+  assert.equal(received.toString(),'recovery password');assert.equal(startedVault,vault);
+});
+test('enabled v3 starts the browser passkey flow without prompting',async()=>{
+  const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
+  const output=new PassThrough();let prompts=0,lockedPrepared;
+  const prepared={version:3,passkey:{credentialId:'key'},close:async()=>{}};
+  let running;const ready=new Promise(resolve=>{
+    running=run({argv:['--vault','/tmp'],stdin:input,stdout:output,passwordReader:async()=>{prompts++;return Buffer.from('unused');},
+      prepareVault:async()=>prepared,startLockedServer:async value=>{lockedPrepared=value;return {origin:'http://localhost:1',launchUrl:'http://localhost:1/',close:async()=>{}};},
+      opener:async()=>{},onReady:resolve});
+  });
+  await ready;input.write('q');await running;
+  assert.equal(lockedPrepared,prepared);assert.equal(prompts,0);
 });
 test('text prompt echoes input and supports backspace',async()=>{
   const input=new PassThrough();input.isTTY=true;let raw=false;input.setRawMode=value=>{raw=value;};

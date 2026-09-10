@@ -1,14 +1,17 @@
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { deriveKey, derivePasskeyKey, seal, open } from './crypto.js';
-import { aad, DATA_VERSION, LEGACY_HEADER_VERSION, HEADER_VERSION, KDF, MAX_CATALOG, MAX_HEADER, VaultError } from './format.js';
+import { deriveKey, derivePasskeyKey, deriveRecoveryImageKey, seal, open } from './crypto.js';
+import { aad, DATA_VERSION, LEGACY_HEADER_VERSION, PASSKEY_HEADER_VERSION, HEADER_VERSION, KDF, MAX_CATALOG, MAX_HEADER, VaultError } from './format.js';
 import { assertDirectory, readLimited, writeAtomic, syncDirectory } from './atomic.js';
 import { acquireLock } from './lock.js';
+import { createRecoveryImage as createRecoveryPng, readRecoveryImage } from './recovery-image.js';
 
 function v1Context(header) { return aad('secretcli-envelope', header.version, header.vaultId, header.salt, header.kdf); }
-function recoveryContext(header) { return aad('secretcli-recovery-envelope', header.version, header.dataVersion, header.vaultId, header.recovery.salt, header.recovery.kdf); }
-function passkeyContext(header) { return aad('secretcli-passkey-envelope', header.version, header.dataVersion, header.vaultId, header.passkey.credentialId, header.passkey.publicKey, header.passkey.counter, header.passkey.prfSalt); }
+function recoveryContext(header) { return aad('secretcli-recovery-envelope', PASSKEY_HEADER_VERSION, DATA_VERSION, header.vaultId, header.recovery.salt, header.recovery.kdf); }
+function passkeyWrapVersion(passkey) { return passkey.wrapVersion ?? PASSKEY_HEADER_VERSION; }
+function passkeyContext(header) { return aad('secretcli-passkey-envelope', passkeyWrapVersion(header.passkey), DATA_VERSION, header.vaultId, header.passkey.credentialId, header.passkey.publicKey, header.passkey.counter, header.passkey.prfSalt); }
+function recoveryImageContext(header) { return aad('secretcli-image-key-envelope', HEADER_VERSION, DATA_VERSION, header.vaultId, header.recoveryImage.salt); }
 
 const PASSKEY_TRANSPORTS = new Set(['ble', 'cable', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']);
 
@@ -33,7 +36,21 @@ function validatePasskey(passkey, requireWrapped) {
   if (!Number.isSafeInteger(passkey.counter) || passkey.counter < 0) throw new Error('Invalid passkey counter');
   if (!Array.isArray(passkey.transports) || passkey.transports.length > PASSKEY_TRANSPORTS.size || passkey.transports.some(value => !PASSKEY_TRANSPORTS.has(value)) || new Set(passkey.transports).size !== passkey.transports.length) throw new Error('Invalid passkey transports');
   decodeBase64(passkey.prfSalt, 32, 'passkey PRF salt');
+  if (passkey.wrapVersion !== undefined && passkey.wrapVersion !== PASSKEY_HEADER_VERSION && passkey.wrapVersion !== HEADER_VERSION) throw new Error('Invalid passkey wrap version');
   if (requireWrapped) decodeBase64(passkey.wrapped, 60, 'wrapped passkey vault key');
+}
+
+function validateRecovery(recovery) {
+  if (!recovery || typeof recovery !== 'object' || JSON.stringify(recovery.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported vault format');
+  decodeBase64(recovery.salt, 32, 'recovery salt');
+  decodeBase64(recovery.wrapped, 60, 'wrapped recovery vault key');
+}
+
+function validateRecoveryImage(recoveryImage) {
+  if (recoveryImage === null) return;
+  if (!recoveryImage || typeof recoveryImage !== 'object') throw new Error('Invalid recovery image envelope');
+  decodeBase64(recoveryImage.salt, 32, 'recovery image salt');
+  decodeBase64(recoveryImage.wrapped, 60, 'wrapped recovery image vault key');
 }
 
 function parseHeader(bytes) {
@@ -46,18 +63,27 @@ function parseHeader(bytes) {
     decodeBase64(header.wrapped, 60, 'wrapped vault key');
     return header;
   }
-  if (header.version === HEADER_VERSION) {
-    if (header.dataVersion !== DATA_VERSION || !header.recovery || JSON.stringify(header.recovery.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported vault format');
-    decodeBase64(header.recovery.salt, 32, 'recovery salt');
-    decodeBase64(header.recovery.wrapped, 60, 'wrapped recovery vault key');
+  if (header.version === PASSKEY_HEADER_VERSION) {
+    if (header.dataVersion !== DATA_VERSION) throw new Error('Unsupported vault format');
+    validateRecovery(header.recovery);
     validatePasskey(header.passkey, true);
+    return header;
+  }
+  if (header.version === HEADER_VERSION) {
+    if (header.dataVersion !== DATA_VERSION) throw new Error('Unsupported vault format');
+    validateRecovery(header.recovery);
+    if (header.passkey !== null) {
+      validatePasskey(header.passkey, true);
+      if (header.passkey.wrapVersion === undefined) throw new Error('Invalid passkey wrap version');
+    }
+    validateRecoveryImage(header.recoveryImage);
     return header;
   }
   throw new Error('Unsupported vault format');
 }
 
 function publicPasskey(header) {
-  if (header.version !== HEADER_VERSION) return null;
+  if (header.version === LEGACY_HEADER_VERSION || header.passkey === null) return null;
   const { credentialId, publicKey, counter, transports, prfSalt } = header.passkey;
   return { credentialId, publicKey, counter, transports: [...transports], prfSalt };
 }
@@ -122,27 +148,31 @@ export async function prepareCatalog(path) {
       return entries;
     }
 
-    async function finish(key) {
+    async function finish(key, recoveryWrapping) {
       if (key.length !== 32) { key.fill(0); throw new Error('Invalid vault key'); }
       let entries;
       try {
         entries = await readEntries(key);
         if (closing) throw new Error('Prepared vault is closed');
         consumed = true;
-        return makeCatalog(key, entries);
-      } catch (error) { entries?.splice(0); key.fill(0); throw error; }
+        return makeCatalog(key, entries, recoveryWrapping);
+      } catch (error) { entries?.splice(0); key.fill(0); recoveryWrapping?.fill(0); throw error; }
     }
 
     async function unlockWithPassword(password) {
       beginAttempt();
       try {
         const recovery = header.version === LEGACY_HEADER_VERSION ? header : header.recovery;
-        const wrapping = await deriveKey(password, Buffer.from(recovery.salt, 'base64'));
+        let wrapping = await deriveKey(password, Buffer.from(recovery.salt, 'base64'));
         let key;
         try { key = open(wrapping, Buffer.from(recovery.wrapped, 'base64'), header.version === LEGACY_HEADER_VERSION ? v1Context(header) : recoveryContext(header)); }
         catch { throw unlockError(); }
-        finally { wrapping.fill(0); }
-        return await finish(key);
+        const retained = header.version === LEGACY_HEADER_VERSION ? wrapping : undefined;
+        try {
+          const catalog = await finish(key, retained);
+          if (retained) wrapping = undefined;
+          return catalog;
+        } finally { wrapping?.fill(0); }
       } finally { endAttempt(); }
     }
 
@@ -153,10 +183,10 @@ export async function prepareCatalog(path) {
       try {
         beginAttempt();
         started = true;
-        if (header.version !== HEADER_VERSION) throw new VaultError('This vault does not have a passkey', 400);
+        if (header.version === LEGACY_HEADER_VERSION || header.passkey === null) throw new VaultError('This vault does not have a passkey', 400);
         if (!Number.isSafeInteger(newCounter) || newCounter < header.passkey.counter) throw new VaultError('Invalid passkey counter', 401);
         const salt = Buffer.from(header.passkey.prfSalt, 'base64');
-        try { wrapping = derivePasskeyKey(prf, salt, header.vaultId, header.passkey.credentialId); }
+        try { wrapping = derivePasskeyKey(prf, salt, header.vaultId, header.passkey.credentialId, passkeyWrapVersion(header.passkey)); }
         finally { salt.fill(0); }
         try { key = open(wrapping, Buffer.from(header.passkey.wrapped, 'base64'), passkeyContext(header)); }
         catch { throw unlockError(); }
@@ -183,8 +213,48 @@ export async function prepareCatalog(path) {
       }
     }
 
-    function makeCatalog(key, entries) {
+    async function unlockWithRecoveryImage(image) {
+      let secret, salt, wrapping, key;
+      beginAttempt();
+      try {
+        if (header.version !== HEADER_VERSION || header.recoveryImage === null) throw new VaultError('This vault does not have a recovery file', 400);
+        secret = readRecoveryImage(image, header.vaultId);
+        salt = Buffer.from(header.recoveryImage.salt, 'base64');
+        wrapping = await deriveRecoveryImageKey(secret, salt, header.vaultId);
+        try { key = open(wrapping, Buffer.from(header.recoveryImage.wrapped, 'base64'), recoveryImageContext(header)); }
+        catch { throw new VaultError('Could not unlock with this recovery file; it may have been replaced or damaged.', 401); }
+        return await finish(key);
+      } finally {
+        secret?.fill(0); salt?.fill(0); wrapping?.fill(0);
+        endAttempt();
+      }
+    }
+
+    function makeCatalog(key, entries, legacyRecoveryWrapping) {
       let catalogClosed = false;
+      function v3Header() {
+        let recovery;
+        if (header.version === LEGACY_HEADER_VERSION) {
+          if (!legacyRecoveryWrapping) throw new Error('Password recovery is unavailable');
+          recovery = { salt: header.salt, kdf: header.kdf };
+          const contextHeader = { vaultId: header.vaultId, recovery };
+          recovery.wrapped = seal(legacyRecoveryWrapping, key, recoveryContext(contextHeader)).toString('base64');
+        } else {
+          recovery = { ...header.recovery };
+        }
+        let passkey = null;
+        if (header.version !== LEGACY_HEADER_VERSION && header.passkey !== null) {
+          passkey = { ...header.passkey, transports: [...header.passkey.transports], wrapVersion: passkeyWrapVersion(header.passkey) };
+        }
+        return { version: HEADER_VERSION, dataVersion: DATA_VERSION, vaultId: header.vaultId, recovery, passkey,
+          recoveryImage: header.version === HEADER_VERSION && header.recoveryImage ? { ...header.recoveryImage } : null };
+      }
+
+      async function commit(next) {
+        await writeAtomic(join(path, 'vault.json'), Buffer.from(JSON.stringify(next)));
+        header = next;
+      }
+
       return { vaultId: header.vaultId, entries,
         async save(next) {
           if (catalogClosed) throw new Error('Vault is locked');
@@ -210,7 +280,7 @@ export async function prepareCatalog(path) {
               if (currentKey.length !== key.length || !timingSafeEqual(currentKey, key)) throw unlockError();
             } finally { currentKey.fill(0); }
 
-            const next = { version: HEADER_VERSION, dataVersion: DATA_VERSION, vaultId: header.vaultId,
+            const next = { version: PASSKEY_HEADER_VERSION, dataVersion: DATA_VERSION, vaultId: header.vaultId,
               recovery: { salt: randomBytes(32).toString('base64'), kdf: KDF },
               passkey: { credentialId: metadata.credentialId, publicKey: metadata.publicKey, counter: metadata.counter, transports: [...metadata.transports], prfSalt: metadata.prfSalt }
             };
@@ -220,7 +290,7 @@ export async function prepareCatalog(path) {
             let passkeyWrapping;
             try {
               next.recovery.wrapped = seal(recoveryWrapping, key, recoveryContext(next)).toString('base64');
-              passkeyWrapping = derivePasskeyKey(prf, passkeySalt, next.vaultId, next.passkey.credentialId);
+               passkeyWrapping = derivePasskeyKey(prf, passkeySalt, next.vaultId, next.passkey.credentialId, PASSKEY_HEADER_VERSION);
               next.passkey.wrapped = seal(passkeyWrapping, key, passkeyContext(next)).toString('base64');
               const recoveryCheck = open(recoveryWrapping, Buffer.from(next.recovery.wrapped, 'base64'), recoveryContext(next));
               const passkeyCheck = open(passkeyWrapping, Buffer.from(next.passkey.wrapped, 'base64'), passkeyContext(next));
@@ -229,17 +299,63 @@ export async function prepareCatalog(path) {
               } finally { recoveryCheck.fill(0); passkeyCheck.fill(0); }
               await writeAtomic(join(path, 'vault.json'), Buffer.from(JSON.stringify(next)));
               header = next;
-            } finally { recoverySalt.fill(0); passkeySalt.fill(0); recoveryWrapping.fill(0); passkeyWrapping?.fill(0); }
-          } finally { prf.fill(0); }
+             } finally { recoverySalt.fill(0); passkeySalt.fill(0); recoveryWrapping.fill(0); passkeyWrapping?.fill(0); }
+           } finally { prf.fill(0); }
+         },
+        async createRecoveryImage() {
+          if (catalogClosed) throw new Error('Vault is locked');
+          const { image, secret } = createRecoveryPng(header.vaultId);
+          const next = v3Header(), salt = randomBytes(32);
+          let wrapping, check, committed = false;
+          try {
+            next.recoveryImage = { salt: salt.toString('base64') };
+            wrapping = await deriveRecoveryImageKey(secret, salt, next.vaultId);
+            next.recoveryImage.wrapped = seal(wrapping, key, recoveryImageContext(next)).toString('base64');
+            check = open(wrapping, Buffer.from(next.recoveryImage.wrapped, 'base64'), recoveryImageContext(next));
+            if (!timingSafeEqual(check, key)) throw new Error('Could not construct recovery image envelope');
+            await commit(next);
+            committed = true;
+            return image;
+          } finally {
+            secret.fill(0); salt.fill(0); wrapping?.fill(0); check?.fill(0);
+            if (!committed) image.fill(0);
+          }
+        },
+        async disablePasskey() {
+          if (catalogClosed) throw new Error('Vault is locked');
+          const next = v3Header();
+          next.passkey = null;
+          await commit(next);
+        },
+        async setPasskey(metadata, prfOutput) {
+          if (catalogClosed) throw new Error('Vault is locked');
+          validatePasskey(metadata, false);
+          if (!Buffer.isBuffer(prfOutput) || prfOutput.length !== 32) throw new Error('Invalid WebAuthn PRF output');
+          const prf = Buffer.from(prfOutput), next = v3Header();
+          next.passkey = { credentialId: metadata.credentialId, publicKey: metadata.publicKey, counter: metadata.counter,
+            transports: [...metadata.transports], prfSalt: metadata.prfSalt, wrapVersion: HEADER_VERSION };
+          const salt = Buffer.from(next.passkey.prfSalt, 'base64');
+          let wrapping, check;
+          try {
+            wrapping = derivePasskeyKey(prf, salt, next.vaultId, next.passkey.credentialId, HEADER_VERSION);
+            next.passkey.wrapped = seal(wrapping, key, passkeyContext(next)).toString('base64');
+            check = open(wrapping, Buffer.from(next.passkey.wrapped, 'base64'), passkeyContext(next));
+            if (!timingSafeEqual(check, key)) throw new Error('Could not construct passkey envelope');
+            await commit(next);
+          } finally { prf.fill(0); salt.fill(0); wrapping?.fill(0); check?.fill(0); }
+        },
+        passkeyStatus() {
+          if (catalogClosed) throw new Error('Vault is locked');
+          return { enabled: Boolean(header.passkey) };
         },
         async close() {
           if (catalogClosed) return;
-          catalogClosed = true; entries.length = 0; key.fill(0); await release();
+          catalogClosed = true; entries.length = 0; key.fill(0); legacyRecoveryWrapping?.fill(0); await release();
         }
       };
     }
 
-    return { version: header.version, vaultId: header.vaultId, passkey: publicPasskey(header), unlockWithPassword, unlockWithPasskey,
+    return { version: header.version, vaultId: header.vaultId, passkey: publicPasskey(header), unlockWithPassword, unlockWithPasskey, unlockWithRecoveryImage,
       async close() {
         if (closed || consumed) return;
         if (closePromise) return closePromise;

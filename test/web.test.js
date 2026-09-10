@@ -20,7 +20,9 @@ async function unlockPage(mode,responses,credentials){
     requests.push([path,JSON.parse(init.body||'{}')]);
     return {ok:true,json:async()=>responses.shift()};
   };
-  window.eval(await readFile(new URL('../web/unlock.js',import.meta.url),'utf8'));
+  const helpers=(await readFile(new URL('../web/webauthn.js',import.meta.url),'utf8')).replace(/^export /gm,'');
+  const unlock=(await readFile(new URL('../web/unlock.js',import.meta.url),'utf8')).replace(/^import .*;$/m,'');
+  window.eval(`${helpers}\n${unlock}`);
   return {window,requests};
 }
 
@@ -317,4 +319,110 @@ test('selection clears when the browser reloads',{timeout:20000},async t=>{
   await until(()=>doc.querySelectorAll('.file-row').length===1,'Entries did not reload');
   assert.equal(doc.querySelector('#selection-actions').hidden,true);
   assert.equal(doc.querySelectorAll('.entry-select:checked').length,0);
+});
+
+test('security controls confirm passkey disable and roll back a failed change',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-security-disable-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('security disable passphrase'));
+  let attempts=0;
+  vault.passkeyStatus=()=>({enabled:true});
+  vault.disablePasskey=async()=>{attempts++;if(attempts===1)throw new Error('device refused');};
+  const app=await startServer(vault);
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelector('#passkey-switch')?.checked===true,'Passkey status did not load');
+
+  const passkeySwitch=doc.querySelector('#passkey-switch');
+  passkeySwitch.click();
+  assert.equal(doc.querySelector('#action-dialog').open,true,'Disable confirmation did not open');
+  assert.match(doc.querySelector('#dialog-description').textContent,/password.*recovery file/i);
+  doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>attempts===1&&passkeySwitch.checked,'Failed disable did not restore the switch');
+  assert.match(doc.querySelector('#notice').textContent,/could not disable passkey/i);
+  doc.querySelector('#dialog-cancel').click();
+
+  passkeySwitch.click();
+  doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>attempts===2&&!doc.querySelector('#action-dialog').open,'Confirmed disable did not complete');
+  assert.equal(passkeySwitch.checked,false);
+  assert.match(doc.querySelector('#passkey-status').textContent,/off/i);
+});
+
+test('security controls enroll a fresh passkey and download a replacement recovery image',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-security-enable-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('security enable passphrase'));
+  const paths=[],image=Buffer.from('\x89PNG replacement');
+  vault.passkeyStatus=()=>({enabled:false});
+  vault.setPasskey=async()=>{};
+  vault.createRecoveryImage=async()=>image;
+  const service={
+    async beginRegistration(){paths.push('options');if(paths.length===1)throw new Error('unavailable');return {challenge:'AQ',rp:{id:'localhost',name:'Vault'},user:{id:'Ag',name:'vault',displayName:'Vault'}};},
+    async verifyRegistration(){paths.push('verify');return {challenge:'Aw',allowCredentials:[{id:'BA',type:'public-key'}]};},
+    async verifyRegistrationConfirmation(){paths.push('confirm');return {credentialId:'BA',publicKey:'BQ',counter:0,transports:['internal'],prfSalt:'Bg',prfOutput:Buffer.alloc(32,7),newCounter:0};}
+  };
+  const app=await startServer(vault,{passkeyService:service});
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelector('#passkey-switch')?.disabled===false,'Passkey status did not load');
+  window.PublicKeyCredential=class {};
+  const result=Uint8Array.from({length:32},(_,index)=>index);
+  const created={id:'new',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{attestationObject:Uint8Array.of(2).buffer,clientDataJSON:Uint8Array.of(3).buffer,getTransports:()=>['internal']}};
+  const confirmed={id:'new',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(4).buffer,clientDataJSON:Uint8Array.of(5).buffer,signature:Uint8Array.of(6).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
+  Object.defineProperty(window.navigator,'credentials',{configurable:true,value:{create:async()=>created,get:async()=>confirmed}});
+
+  const passkeySwitch=doc.querySelector('#passkey-switch');
+  passkeySwitch.click();
+  await until(()=>paths.length===1&&!passkeySwitch.disabled,'Failed enrollment did not complete');
+  assert.equal(passkeySwitch.checked,false,'Failed enrollment did not restore the switch');
+  assert.match(doc.querySelector('#notice').textContent,/could not enable passkey/i);
+  passkeySwitch.click();
+  await until(()=>paths.length===4&&passkeySwitch.checked,()=>`Fresh passkey enrollment did not complete: ${paths.join(',')} ${doc.querySelector('#notice').textContent}`);
+  assert.deepEqual(paths,['options','options','verify','confirm']);
+  assert.match(doc.querySelector('#passkey-status').textContent,/on/i);
+
+  const downloads=[];
+  window.URL.createObjectURL=blob=>{downloads.push({blob});return 'blob:recovery';};
+  window.URL.revokeObjectURL=url=>{downloads.at(-1).revoked=url;};
+  window.HTMLAnchorElement.prototype.click=function(){downloads.at(-1).name=this.download;downloads.at(-1).href=this.href;};
+  doc.querySelector('#generate-recovery').click();
+  await until(()=>downloads.length===1&&downloads[0].revoked,'Recovery file was not downloaded and revoked');
+  assert.equal(downloads[0].blob.type,'image/png');
+  assert.equal(downloads[0].name,'Vault recovery file.png');
+  assert.equal(downloads[0].href,'blob:recovery');
+  assert.equal(downloads[0].revoked,'blob:recovery');
+  assert.match(doc.querySelector('#generate-recovery').textContent,/replace/i);
+});
+
+test('bulk Download requests a ticket for visible selection and navigates a hidden anchor',{timeout:20000},async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-bulk-download-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('bulk download passphrase'));
+  await vault.upload(null,'first.txt','text/plain',[Buffer.from('first')]);
+  await vault.upload(null,'second.txt','text/plain',[Buffer.from('second')]);
+  const app=await startServer(vault);
+  const browser=new Browser({settings:{enableJavaScriptEvaluation:true,suppressInsecureJavaScriptEnvironmentWarning:true,fetch:{requestHeaders:[{headers:{Origin:app.origin}}]}}});
+  t.after(async()=>{await browser.close();await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const page=browser.newPage();await page.goto(app.launchUrl);
+  const window=page.mainFrame.window,doc=window.document;
+  await until(()=>doc.querySelectorAll('.file-row').length===2,'Entries did not load');
+  assert.equal(doc.querySelector('#bulk-download').disabled,true);
+  const nativeFetch=window.fetch.bind(window),requests=[];
+  window.fetch=async(path,init)=>{if(path==='/api/downloads'){requests.push(JSON.parse(init.body));return {ok:true,status:201,json:async()=>({url:'/api/downloads/token'})};}return nativeFetch(path,init);};
+  let navigatedTo,anchorHidden;
+  window.HTMLAnchorElement.prototype.click=function(){navigatedTo=this.getAttribute('href');anchorHidden=this.hidden;};
+  doc.querySelector('#select-all').click();doc.querySelector('#bulk-download').click();
+  await until(()=>navigatedTo,'Download ticket did not navigate');
+  assert.deepEqual(requests[0].ids.sort(),vault.list(null).map(entry=>entry.id).sort());
+  assert.equal(navigatedTo,'/api/downloads/token');
+  assert.equal(anchorHidden,true);
+  assert.equal(doc.querySelector('#selection-count').textContent,'2 selected');
+
+  window.fetch=async(path,init)=>path==='/api/downloads'?{ok:false,status:500,json:async()=>({error:'Ticket service unavailable'})}:nativeFetch(path,init);
+  navigatedTo=undefined;doc.querySelector('#bulk-download').click();
+  await until(()=>doc.querySelector('#notice').textContent.includes('Ticket service unavailable'),'Ticket failure notice missing');
+  assert.equal(navigatedTo,undefined);
+  assert.equal(doc.querySelector('#bulk-download').disabled,false);
 });

@@ -2,22 +2,25 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { randomBytes } from 'node:crypto';
 import { createPasskeyService } from '../auth/passkeys.js';
 import { VaultError } from '../vault/format.js';
 import { createSession } from './session.js';
 import { headers, checkRequest, contentType, disposition } from './security.js';
 import { parseRange } from './ranges.js';
 import { restrictedPage } from './unlock.js';
+import { createZipStream } from './zip.js';
 
 const assets = new Map([
   ['/', 'index.html'],
   ['/styles.css', 'styles.css'],
   ['/app.js', 'app.js'],
+  ['/webauthn.js', 'webauthn.js'],
   ['/api.js', 'api.js'],
   ['/preview.js', 'preview.js'],
   ['/thumbnails.js', 'thumbnails.js']
 ]);
-const restrictedAssets = new Set(['/', '/styles.css', '/unlock.js']);
+const restrictedAssets = new Set(['/', '/styles.css', '/unlock.js', '/webauthn.js']);
 
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -55,6 +58,7 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
   const session = createSession();
   const sockets = new Set();
   const pending = new Set();
+  const downloadTickets = new Map();
   let vault = initialVault;
   let mode = initialMode;
   let origin;
@@ -92,10 +96,11 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
         res.end(restrictedPage(mode));
         return true;
       }
-      if (path === '/unlock.js') {
+      if (path === '/unlock.js' || path === '/webauthn.js') {
         try {
-          const data = await readFile(new URL('../../web/unlock.js', import.meta.url));
-          res.writeHead(200, { 'Content-Type': assetType('unlock.js') });
+          const file = path.slice(1);
+          const data = await readFile(new URL(`../../web/${file}`, import.meta.url));
+          res.writeHead(200, { 'Content-Type': assetType(file) });
           res.end(data);
         } catch (error) {
           if (error.code !== 'ENOENT') throw error;
@@ -242,12 +247,103 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
     }
     session.authenticate(req);
     if (!['GET', 'HEAD'].includes(req.method)) session.verifyCsrf(req);
+    const sessionId = (req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('secretcli='))?.slice(10);
     if (req.method === 'GET' && path === '/api/session') {
       json(res, 200, { csrfToken: session.csrf() });
       return;
     }
     if (req.method === 'GET' && path === '/api/heartbeat') {
       json(res, 200, { unlocked: true });
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/passkey') {
+      json(res, 200, vault.passkeyStatus());
+      return;
+    }
+    if (req.method === 'DELETE' && path === '/api/passkey') {
+      await vault.disablePasskey();
+      json(res, 200, { enabled: false });
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/passkey/registration/options') {
+      await body(req, 64 * 1024);
+      try {
+        json(res, 200, await passkeys.beginRegistration({
+          userID: Buffer.from(vault.vaultId),
+          userName: vault.vaultId,
+          userDisplayName: 'Vault'
+        }));
+      } catch {
+        throw safeAuthError(400, 'Could not start passkey enrollment');
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/passkey/registration/verify') {
+      const value = await body(req, 64 * 1024);
+      try {
+        json(res, 200, await passkeys.verifyRegistration(value.credential));
+      } catch {
+        throw safeAuthError(400, 'Passkey enrollment failed');
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/passkey/registration/confirm') {
+      const value = await body(req, 64 * 1024);
+      let result;
+      try {
+        result = await passkeys.verifyRegistrationConfirmation(value.credential, value.prf);
+      } catch {
+        throw safeAuthError(400, 'Passkey enrollment failed');
+      }
+      const { prfOutput, newCounter: _newCounter, ...metadata } = result;
+      try {
+        await vault.setPasskey(metadata, prfOutput);
+      } catch {
+        throw safeAuthError(400, 'Passkey enrollment failed');
+      }
+      json(res, 200, { enabled: true });
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/recovery-image') {
+      const image = await vault.createRecoveryImage();
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Disposition': disposition('Vault recovery file.png', true)
+      });
+      res.end(image);
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/downloads') {
+      const value = await body(req, 512 * 1024);
+      if (Object.keys(value).length !== 1 || !Array.isArray(value.ids) || value.ids.length < 1 || value.ids.length > 10000 ||
+          value.ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) ||
+          new Set(value.ids).size !== value.ids.length) throw new VaultError('Select 1 to 10,000 unique entry IDs');
+      const now = Date.now();
+      for (const [token, ticket] of downloadTickets) if (ticket.expiresAt <= now) downloadTickets.delete(token);
+      const token = randomBytes(32).toString('hex');
+      downloadTickets.set(token, { ids: [...value.ids], sessionId, expiresAt: now + 30000 });
+      json(res, 201, { url: `/api/downloads/${token}` });
+      return;
+    }
+    const downloadMatch = /^\/api\/downloads\/([a-f0-9]{64})$/.exec(path);
+    if (req.method === 'GET' && downloadMatch) {
+      const ticket = downloadTickets.get(downloadMatch[1]);
+      const expired = ticket && Date.now() >= ticket.expiresAt;
+      if (!ticket || ticket.sessionId !== sessionId || expired) {
+        if (expired) downloadTickets.delete(downloadMatch[1]);
+        throw new VaultError('Download not found', 404);
+      }
+      downloadTickets.delete(downloadMatch[1]);
+      let snapshot;
+      try {
+        snapshot = await vault.openExport(ticket.ids);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', disposition('Vault export.zip', true));
+        res.statusCode = 200;
+        await pipeline(createZipStream(snapshot.entries), res);
+      } finally {
+        await snapshot?.release();
+      }
       return;
     }
     if (req.method === 'GET' && path === '/api/entries') {
@@ -331,7 +427,7 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
     server.listen(0, '127.0.0.1', resolve);
   });
   origin = `http://localhost:${server.address().port}`;
-  const passkeys = passkeyService ?? (mode === 'ready' ? undefined : createPasskeyService({ origin }));
+  const passkeys = passkeyService ?? createPasskeyService({ origin });
   const api = {
     origin,
     launchUrl: mode === 'ready' ? '' : `${origin}/`,
@@ -358,10 +454,30 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
       await onUnlock?.(opened);
       return api.renewLaunchUrl();
     },
+    async recoverWithRecoveryImage(image) {
+      if (!prepared || mode !== 'locked' || closed) throw new VaultError('Vault is not waiting for recovery', 400);
+      mode = 'unlocking';
+      let opened;
+      try {
+        opened = await prepared.unlockWithRecoveryImage(image);
+      } catch (error) {
+        if (!closed) mode = 'locked';
+        throw error;
+      }
+      if (closed) {
+        await opened.close?.();
+        throw new VaultError('Vault is locked', 401);
+      }
+      vault = opened;
+      mode = 'ready';
+      await onUnlock?.(opened);
+      return api.renewLaunchUrl();
+    },
     close() {
       if (closePromise) return closePromise;
       closed = true;
       mode = 'closed';
+      downloadTickets.clear();
       session.close();
       const ownerClose = Promise.resolve().then(() => prepared?.close());
       const activeEnrollment = enrollmentWork;
@@ -381,8 +497,8 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
   return api;
 }
 
-export function startServer(vault) {
-  return start({ initialVault: vault, initialMode: 'ready' });
+export function startServer(vault, { passkeyService } = {}) {
+  return start({ initialVault: vault, initialMode: 'ready', passkeyService });
 }
 
 export function startLockedServer(prepared, { passkeyService, onUnlock } = {}) {

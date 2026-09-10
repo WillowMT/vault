@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { createVault, prepareVault, unlockVault } from '../src/vault/vault.js';
+import { createCatalog } from '../src/vault/catalog.js';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'secretcli-test-'));
@@ -304,4 +306,153 @@ test('closing during passkey unlock releases ownership even after counter persis
   const next=await prepareVault(path);
   const recovered=await next.unlockWithPassword(password);
   await recovered.close();
+});
+
+test('recovery image unlocks v3 and replacement revokes the old image without rewriting data', async t => {
+  const {vault,path,password}=await fixture(t);
+  const file=await vault.upload(null,'kept.txt','text/plain',[Buffer.from('kept')]);
+  const catalogBefore=await readFile(join(path,'catalog.enc'));
+  const objectName=(await readdir(join(path,'objects')))[0];
+  const objectBefore=await readFile(join(path,'objects',objectName));
+  const first=await vault.createRecoveryImage();
+  await vault.close();
+
+  const prepared=await prepareVault(path);
+  assert.equal(prepared.version,3);
+  const reopened=await prepared.unlockWithRecoveryImage(first);
+  assert.equal((await collect(reopened.read(file.id))).toString(),'kept');
+  const second=await reopened.createRecoveryImage();
+  await reopened.close();
+
+  const stale=await prepareVault(path);
+  await assert.rejects(stale.unlockWithRecoveryImage(first),/recovery image|unlock|damaged/i);
+  await stale.close();
+  const current=await prepareVault(path);
+  const recovered=await current.unlockWithRecoveryImage(second);
+  await recovered.close();
+  assert.deepEqual(await readFile(join(path,'catalog.enc')),catalogBefore);
+  assert.deepEqual(await readFile(join(path,'objects',objectName)),objectBefore);
+  assert.ok(password.length);
+});
+
+test('disabled passkey v3 remains password accessible and preserves a v2 recovery context', async t => {
+  const {vault,path,password}=await fixture(t);
+  await vault.enrollPasskey(password,passkeyMetadata(),Buffer.alloc(32,27));
+  const before=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+
+  await vault.disablePasskey();
+  assert.deepEqual(vault.passkeyStatus(),{enabled:false});
+  await vault.close();
+
+  const header=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(header.version,3);
+  assert.deepEqual(header.recovery,before.recovery);
+  assert.equal(header.passkey,null);
+  assert.equal(header.recoveryImage,null);
+  const prepared=await prepareVault(path);
+  assert.equal(prepared.version,3);
+  assert.equal(prepared.passkey,null);
+  const reopened=await prepared.unlockWithPassword(password);
+  await reopened.close();
+});
+
+test('v3 passkeys use wrap version 3 and preserve caller PRF buffers', async t => {
+  const {vault,path}=await fixture(t);
+  await vault.disablePasskey();
+  const metadata=passkeyMetadata(),prfOutput=Buffer.alloc(32,29),before=Buffer.from(prfOutput);
+  await vault.setPasskey(metadata,prfOutput);
+  assert.deepEqual(prfOutput,before);
+  assert.deepEqual(vault.passkeyStatus(),{enabled:true});
+  await vault.close();
+
+  const header=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(header.passkey.wrapVersion,3);
+  const prepared=await prepareVault(path);
+  assert.equal(prepared.passkey.credentialId,metadata.credentialId);
+  const reopened=await prepared.unlockWithPasskey(prfOutput,6);
+  await reopened.close();
+});
+
+test('v3 preserves and unlocks a promoted wrap-version-2 passkey envelope', async t => {
+  const {vault,path,password}=await fixture(t);
+  const metadata=passkeyMetadata(),prfOutput=Buffer.alloc(32,30);
+  await vault.enrollPasskey(password,metadata,prfOutput);
+  const v2=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  await vault.createRecoveryImage();
+  await vault.close();
+
+  const v3=JSON.parse(await readFile(join(path,'vault.json'),'utf8'));
+  assert.equal(v3.passkey.wrapVersion,2);
+  assert.equal(v3.passkey.wrapped,v2.passkey.wrapped);
+  const prepared=await prepareVault(path);
+  const reopened=await prepared.unlockWithPasskey(prfOutput,5);
+  await reopened.close();
+});
+
+test('v3 mutations serialize with close and reject after locking', async t => {
+  const {vault}=await fixture(t);
+  const creating=vault.createRecoveryImage();
+  const closing=vault.close();
+  const image=await creating;
+  assert.ok(Buffer.isBuffer(image));
+  await closing;
+  await assert.rejects(vault.disablePasskey(),/locked/i);
+});
+
+test('openExport preserves selected hierarchy, empty folders, and deduplicates selections', async t => {
+  const {vault}=await fixture(t);
+  const folder=await vault.mkdir(null,'Folder');
+  const empty=await vault.mkdir(folder.id,'Empty');
+  const child=await vault.upload(folder.id,'child.txt','text/plain',[Buffer.from('child')]);
+  const loose=await vault.upload(null,'loose.txt','text/plain',[Buffer.from('loose')]);
+
+  const snapshot=await vault.openExport([folder.id,child.id,folder.id,empty.id,loose.id]);
+  assert.deepEqual(snapshot.entries.map(entry=>entry.path),[
+    'Folder/',
+    'Folder/Empty/',
+    'Folder/child.txt',
+    'loose.txt'
+  ]);
+  assert.equal((await collect(snapshot.entries.find(entry=>entry.path==='Folder/child.txt').open())).toString(),'child');
+  await snapshot.release();
+});
+
+test('openExport rejects missing IDs, colliding roots, and cyclic catalog ancestry', async t => {
+  const {vault}=await fixture(t);
+  const left=await vault.mkdir(null,'Left'),right=await vault.mkdir(null,'Right');
+  const first=await vault.mkdir(left.id,'Same'),second=await vault.mkdir(right.id,'Same');
+  await assert.rejects(vault.openExport(['missing']),/not found/i);
+  await assert.rejects(vault.openExport([first.id,second.id]),/collision|same name/i);
+
+  const root=await mkdtemp(join(tmpdir(),'secretcli-cycle-'));
+  const path=join(root,'vault'),password=Buffer.from('cycle test passphrase');
+  const catalog=await createCatalog(path,password);
+  const a=randomUUID(),b=randomUUID(),createdAt=new Date().toISOString();
+  await catalog.save([
+    {id:a,parentId:b,name:'A',kind:'folder',size:0,mime:'',createdAt},
+    {id:b,parentId:a,name:'B',kind:'folder',size:0,mime:'',createdAt}
+  ]);
+  await catalog.close();
+  const cyclic=await unlockVault(path,password);
+  try { await assert.rejects(cyclic.openExport([a]),/cycle|hierarchy/i); }
+  finally { await cyclic.close(); await rm(root,{recursive:true,force:true}); }
+});
+
+test('openExport leases deleted objects, releases exactly once, and is invalidated by close', async t => {
+  const {vault,path}=await fixture(t);
+  const file=await vault.upload(null,'leased.txt','text/plain',[Buffer.from('leased data')]);
+  const snapshot=await vault.openExport([file.id]);
+
+  await vault.remove(file.id);
+  assert.equal((await readdir(join(path,'objects'))).length,1);
+  assert.equal((await collect(snapshot.entries[0].open())).toString(),'leased data');
+  await Promise.all([snapshot.release(),snapshot.release()]);
+  assert.equal((await readdir(join(path,'objects'))).length,0);
+  assert.throws(()=>snapshot.entries[0].open(),/released|locked/i);
+
+  const closingFile=await vault.upload(null,'closing.txt','text/plain',[Buffer.from('closing')]);
+  const closingSnapshot=await vault.openExport([closingFile.id]);
+  await vault.close();
+  assert.throws(()=>closingSnapshot.entries[0].open(),/released|locked/i);
+  await closingSnapshot.release();
 });

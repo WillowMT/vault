@@ -7,6 +7,14 @@ import { createVault } from '../src/vault/vault.js';
 import { startServer } from '../src/server/server.js';
 import { parseRange } from '../src/server/ranges.js';
 import { request } from 'node:http';
+import { Readable } from 'node:stream';
+
+async function login(app, launchUrl = app.launchUrl) {
+  const response=await fetch(app.origin+'/api/session',{method:'POST',headers:{Origin:app.origin,'Content-Type':'application/json'},body:JSON.stringify({token:new URL(launchUrl).hash.slice(1)})});
+  assert.equal(response.status,200);
+  const {csrfToken}=await response.json();
+  return {cookie:response.headers.get('set-cookie').split(';')[0],csrfToken};
+}
 
 test('range parser supports seeking and rejects invalid requests',()=>{
   assert.deepEqual(parseRange('bytes=2-4',10),{start:2,end:4});
@@ -81,4 +89,65 @@ test('PDF and text files serve inline for in-browser preview',async t=>{
   const csp=page.headers.get('content-security-policy');
   assert.match(csp,/frame-src 'self'/);
   assert.match(csp,/object-src 'none'/);
+});
+
+test('download tickets are validated, session-bound, expiring, single-use ZIP streams',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-download-'));
+  const vault=await createVault(join(root,'vault'),Buffer.from('download test passphrase'));
+  const app=await startServer(vault);
+  t.after(async()=>{await app.close();await vault.close();await rm(root,{recursive:true,force:true});});
+  const folder=await vault.mkdir(null,'Folder');
+  const file=await vault.upload(folder.id,'hello.txt','text/plain',[Buffer.from('hello')]);
+  const first=await login(app);
+  const post=(ids,session=first)=>fetch(app.origin+'/api/downloads',{method:'POST',headers:{Cookie:session.cookie,Origin:app.origin,'X-CSRF-Token':session.csrfToken,'Content-Type':'application/json'},body:JSON.stringify({ids})});
+
+  assert.equal((await fetch(app.origin+'/api/downloads',{method:'POST',headers:{Origin:app.origin,'Content-Type':'application/json'},body:JSON.stringify({ids:[folder.id]})})).status,401);
+  assert.equal((await fetch(app.origin+'/api/downloads',{method:'POST',headers:{Cookie:first.cookie,Origin:app.origin,'Content-Type':'application/json'},body:JSON.stringify({ids:[folder.id]})})).status,403);
+  for(const ids of [[],['not-a-uuid'],[file.id,file.id],Array(10001).fill(file.id)])assert.equal((await post(ids)).status,400);
+
+  const ticketResponse=await post([folder.id]);
+  assert.equal(ticketResponse.status,201);
+  const ticket=await ticketResponse.json();
+  assert.match(ticket.url,/^\/api\/downloads\/[a-f0-9]{64}$/);
+
+  const secondLaunch=app.renewLaunchUrl();
+  const second=await login(app,secondLaunch);
+  assert.equal((await fetch(app.origin+ticket.url,{headers:{Cookie:second.cookie}})).status,404);
+
+  const freshResponse=await post([folder.id],second);
+  const fresh=await freshResponse.json();
+  const archive=await fetch(app.origin+fresh.url,{headers:{Cookie:second.cookie}});
+  assert.equal(archive.status,200);
+  assert.equal(archive.headers.get('content-type'),'application/zip');
+  assert.match(archive.headers.get('content-disposition'),/^attachment/);
+  assert.equal(archive.headers.get('cache-control'),'no-store');
+  assert.equal((await archive.arrayBuffer()).byteLength>0,true);
+  assert.equal((await fetch(app.origin+fresh.url,{headers:{Cookie:second.cookie}})).status,404);
+
+  const expiring=await (await post([file.id],second)).json();
+  const now=Date.now;
+  Date.now=()=>now()+31000;
+  try { assert.equal((await fetch(app.origin+expiring.url,{headers:{Cookie:second.cookie}})).status,404); }
+  finally { Date.now=now; }
+});
+
+test('server shutdown cancels an active ZIP reader and releases its export once',async t=>{
+  let source,releaseCount=0,startedResolve;
+  const started=new Promise(resolve=>{startedResolve=resolve;});
+  const vault={vaultId:'00000000-0000-4000-8000-000000000000',async openExport(){
+    source=new Readable({read(){if(this.sent)return;this.sent=true;this.push(Buffer.from('x'));startedResolve();}});
+    return {entries:[{kind:'file',path:'stalled.bin',size:2,open:()=>source}],release:async()=>{releaseCount++;}};
+  }};
+  const app=await startServer(vault);
+  t.after(()=>app.close());
+  const session=await login(app);
+  const ticket=await (await fetch(app.origin+'/api/downloads',{method:'POST',headers:{Cookie:session.cookie,Origin:app.origin,'X-CSRF-Token':session.csrfToken,'Content-Type':'application/json'},body:JSON.stringify({ids:['00000000-0000-4000-8000-000000000001']})})).json();
+  const response=await fetch(app.origin+ticket.url,{headers:{Cookie:session.cookie}});
+  await started;
+
+  const body=response.arrayBuffer();
+  await app.close();
+  await assert.rejects(body);
+  assert.equal(source.destroyed,true);
+  assert.equal(releaseCount,1);
 });

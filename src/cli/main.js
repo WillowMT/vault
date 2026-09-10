@@ -1,17 +1,45 @@
-import { lstat, readFile, rm } from 'node:fs/promises';
+import { lstat, readFile, rm, open } from 'node:fs/promises';
 import { resolve, join, basename, isAbsolute } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createVault,unlockVault,prepareVault } from '../vault/vault.js';
 import { exportVault,importVault } from '../vault/archive.js';
 import { loadRegistry,resolveReference,registerVault,touchVault,forgetVault,updateRegistry } from '../vault/registry.js';
-import { startLockedServer,startEnrollmentServer } from '../server/server.js';
+import { startServer,startLockedServer,startEnrollmentServer } from '../server/server.js';
 import { readPassword,readText } from './prompt.js';
 import { banner,renderStatus,busy } from './view.js';
 import { chooseVault } from './picker.js';
 
 const REGISTRY_DEFAULT=join(homedir(),'.secretcli','vaults.json');
+const MAX_RECOVERY_IMAGE=2*1024*1024;
+
+async function readRecoveryImage(path){
+  const file=await open(path,'r');
+  const storage=Buffer.allocUnsafe(MAX_RECOVERY_IMAGE+1);
+  try{
+    let length=0;
+    while(length<storage.length){const {bytesRead}=await file.read(storage,length,storage.length-length);if(!bytesRead)break;length+=bytesRead;}
+    if(length>MAX_RECOVERY_IMAGE)throw new Error('Recovery file is larger than 2 MiB');
+    return {image:storage.subarray(0,length),storage};
+  }catch(error){storage.fill(0);throw error;}
+  finally{await file.close();}
+}
+
+function nativeRecoveryFilePicker(){
+  if(platform()!=='darwin')return Promise.resolve();
+  return new Promise(resolve=>{
+    const child=spawn('osascript',['-e','POSIX path of (choose file with prompt "Select your Vault recovery file")'],{stdio:['ignore','pipe','ignore']});let value='';
+    child.stdout.on('data',chunk=>value+=chunk);
+    child.once('error',()=>resolve());
+    child.once('close',code=>resolve(code===0?value.trim()||undefined:undefined));
+  });
+}
+
+function resolveRecoveryPath(path){
+  const value=path.trim();
+  return resolve(value==='~'||value.startsWith('~/')?join(homedir(),value.slice(2)):value);
+}
 
 function parseArgs(argv){
   const config={mode:'launch',open:true};
@@ -141,7 +169,8 @@ async function importCommand({config,stdout,registryPath}){
   stdout.write(`  Registered as “${registration.entry.name}”. Open it with: vault --vault ${registration.entry.name}\n`);
 }
 
-export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout=process.stdout,stderr=process.stderr,passwordReader=readPassword,opener=openBrowser,onReady,createVault:create=createVault,unlockVault:unlock=unlockVault,prepareVault:prepare=prepareVault,startLockedServer:startLocked=startLockedServer,startEnrollmentServer:startEnrollment=startEnrollmentServer,registryPath=REGISTRY_DEFAULT}={}){
+export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout=process.stdout,stderr=process.stderr,passwordReader=readPassword,textReader=readText,recoveryFilePicker,readRecoveryFile=readRecoveryImage,opener=openBrowser,onReady,createVault:create=createVault,unlockVault:unlock=unlockVault,prepareVault:prepare=prepareVault,startServer:startReady=startServer,startLockedServer:startLocked=startLockedServer,startEnrollmentServer:startEnrollment=startEnrollmentServer,registryPath=REGISTRY_DEFAULT}={}){
+  recoveryFilePicker??=stdin===process.stdin?nativeRecoveryFilePicker:async()=>undefined;
   const config=parseArgs(argv);
   if(config.mode==='vaults')return vaultsCommand({config,stdout,registryPath});
   if(config.mode==='export')return exportCommand({config,stdout,registryPath});
@@ -165,7 +194,22 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
   let opening=false,recovering=false,registerNew=false;
   function launchUrl(){return locked||enrolling?app.launchUrl:app.renewLaunchUrl();}
   async function launch(){if(opening||exiting)return;opening=true;try{await opener(launchUrl());message='Browser opened.';}catch{message='Could not open browser. O retry · L link';}finally{opening=false;draw();}}
-  async function recover(){if(recovering||!locked||exiting)return;recovering=true;try{const password=await passwordReader({input:stdin,output:stdout,label:'Recovery password',signal:abort.signal});try{const url=await app.recover(password);locked=false;await opener(url);message='Vault recovered and browser opened.';}finally{password.fill(0);}}catch(error){if(!abort.signal.aborted)message='Could not recover. Press R to try again.';}finally{recovering=false;draw();}}
+  async function recoveryChoice(target){
+    const choice=await textReader({input:stdin,output:stdout,label:'Recover with [P]assword or [F]ile',signal:abort.signal});
+    try{
+      if(choice.toString().trim().toLowerCase()==='f'){
+        const picked=await recoveryFilePicker();
+        const path=picked??(await textReader({input:stdin,output:stdout,label:'Recovery file path (example: ~/Documents/Vault recovery file.png)',signal:abort.signal}));
+        try{
+          const {image,storage}=await readRecoveryFile(resolveRecoveryPath(path.toString()));
+          try{return await target.image(image);}finally{storage.fill(0);}
+        }finally{if(Buffer.isBuffer(path))path.fill(0);}
+      }
+      const password=await passwordReader({input:stdin,output:stdout,label:'Recovery password',signal:abort.signal});
+      try{return await target.password(password);}finally{password.fill(0);}
+    }finally{choice.fill(0);}
+  }
+  async function recover(){if(recovering||!locked||exiting)return;recovering=true;try{const url=await recoveryChoice({password:value=>app.recover(value),image:value=>app.recoverWithRecoveryImage(value)});locked=false;await opener(url);message='Vault recovered and browser opened.';}catch(error){if(!abort.signal.aborted)message='Could not recover. Press R to try again.';}finally{recovering=false;draw();}}
   function keys(data){for(const key of data.toString()){
     if(key==='\x03'||key==='\x04'||key==='q'){signalStop();return;}
     if(key.toLowerCase()==='o')void launch();
@@ -201,12 +245,18 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
     }
     let exists=true;try{await lstat(config.path);}catch(error){if(error.code==='ENOENT')exists=false;else throw error;}
     if(!exists)stdout.write('  Create your private vault\n  Choose at least 12 characters for your recovery password.\n\n');
-    let attempts=0;
+    let attempts=0,recoveredV3=false;
     if(exists){
       prepared=await prepare(config.path);
       if(exiting){await prepared.close();return;}
-      if(prepared.version===2){app=await startLocked(prepared,{onUnlock:()=>{locked=false;message='Vault unlocked.';draw();}});locked=true;}
-      else{await prepared.close();prepared=undefined;}
+      if(prepared.version===2||(prepared.version===3&&prepared.passkey)){app=await startLocked(prepared,{onUnlock:()=>{locked=false;message='Vault unlocked.';draw();}});locked=true;}
+      else if(prepared.version===3){
+        while(!vault&&!exiting){
+          try{vault=await recoveryChoice({password:value=>prepared.unlockWithPassword(value),image:value=>prepared.unlockWithRecoveryImage(value)});}
+          catch(error){if(abort.signal.aborted)throw error;stdout.write('  Could not unlock. Check your recovery password or file and try again.\n\n');await delay(Math.min(++attempts*500,3000),undefined,{signal:abort.signal});}
+        }
+        if(vault){app=await startReady(vault);recoveredV3=true;}
+      }else{await prepared.close();prepared=undefined;}
     }
     while(!vault&&!app&&!exiting){
       const password=await passwordReader({input:stdin,output:stdout,label:exists?'Password':'Create recovery password',signal:abort.signal});
@@ -224,6 +274,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
         stdout.write('  Could not unlock. Check your password and try again.\n\n');await delay(Math.min(++attempts*500,3000),undefined,{signal:abort.signal});
       }finally{password.fill(0);}
     }
+    if(recoveredV3)message='Vault unlocked.';
     if(exiting){await app.close();await vault?.close();return;}
     if(stdin.isTTY){stdin.setRawMode(true);stdin.resume();stdin.on('data',keys);stdin.once('end',signalStop);stdin.once('close',signalStop);}
     if(!warning)registry=await rememberVault(registryPath,registry,config.path,registerNew);

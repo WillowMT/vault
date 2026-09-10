@@ -1,16 +1,17 @@
-import {bootstrap,request,uploadFile,configureLock,shutdown,isUnlocked} from './api.js';
+import {bootstrap,request,requestBlob,uploadFile,configureLock,shutdown,isUnlocked} from './api.js';
 import {fileCategory,fileIcon,bytes,clearPreview,showPreview,setGallery} from './preview.js';
 import {attachThumbnail,revokeThumbnails} from './thumbnails.js';
+import {enroll} from './webauthn.js';
 const $=selector=>document.querySelector(selector);
-let entries=[],folders=[],visibleEntries=[],selected=new Set(),parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction,dialogGeneration=0;
+let entries=[],folders=[],visibleEntries=[],selected=new Set(),parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction,dialogGeneration=0,passkeyEnabled=false,securityBusy=true,downloadBusy=false;
 const categoryNames={all:'All files',image:'Images',video:'Videos',audio:'Audio',document:'Documents & other'};
 function element(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
 function notice(text,error=false){if(!isUnlocked())return;const node=$('#notice');node.textContent=text;node.className=error?'error':'';node.hidden=false;clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{node.hidden=true;},5000);}
 function selectedEntries(){return visibleEntries.filter(entry=>selected.has(entry.id));}
-function renderSelection(){const count=selectedEntries().length,all=visibleEntries.length>0&&count===visibleEntries.length,selectAll=$('#select-all');if(!selectAll)return;selectAll.checked=all;selectAll.indeterminate=count>0&&!all;selectAll.disabled=!visibleEntries.length;for(const input of document.querySelectorAll('.entry-select'))input.checked=selected.has(input.dataset.entryId);$('#selection-count').textContent=`${count} selected`;$('#selection-actions').hidden=count===0;$('#bulk-move').disabled=count===0;$('#bulk-delete').disabled=count===0;}
+function renderSelection(){const count=selectedEntries().length,all=visibleEntries.length>0&&count===visibleEntries.length,selectAll=$('#select-all');if(!selectAll)return;selectAll.checked=all;selectAll.indeterminate=count>0&&!all;selectAll.disabled=!visibleEntries.length;for(const input of document.querySelectorAll('.entry-select'))input.checked=selected.has(input.dataset.entryId);$('#selection-count').textContent=`${count} selected`;$('#selection-actions').hidden=count===0;$('#bulk-download').disabled=count===0||downloadBusy;$('#bulk-move').disabled=count===0;$('#bulk-delete').disabled=count===0;}
 function clearSelection(){selected.clear();renderSelection();}
 function lockView(){
-  shutdown();revision++;dialogGeneration++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];visibleEntries=[];clearSelection();parentId=null;query='';dialogAction=null;
+  shutdown();revision++;dialogGeneration++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];visibleEntries=[];clearSelection();parentId=null;query='';dialogAction=null;passkeyEnabled=false;securityBusy=true;downloadBusy=false;
   for(const dialog of document.querySelectorAll('dialog'))dialog.close();
   const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open Vault in your terminal, then press O to return.'),element('code','vault'),element('small','This page clears when your CLI session ends.'));
   document.body.replaceChildren(page);document.title='Secret — vault locked';
@@ -84,6 +85,16 @@ function move(entry){const select=destinationField([entry],entry.parentId||'');d
 function remove(entry){dialog({title:`Delete “${entry.name}”?`,description:entry.kind==='folder'?'This permanently deletes the folder and everything inside. There is no trash or undo.':'This permanently deletes this file from your vault. There is no trash or undo.',submit:'Delete permanently',danger:true,action:async()=>{await request(`/api/entries/${entry.id}`,{method:'DELETE'});notice('Deleted from your vault.');}});}
 function bulkMove(){const entries=selectedEntries(),select=destinationField(entries);dialog({title:'Move selected entries',description:`Move ${entries.length} selected ${entries.length===1?'entry':'entries'} to a folder.`,fields:[select],submit:'Move',action:async()=>{const {moved}=await request('/api/entries/bulk-move',{method:'POST',body:{ids:entries.map(entry=>entry.id),parentId:select.value||null}});clearSelection();notice(`Moved ${moved} ${moved===1?'entry':'entries'}.`);}});}
 function bulkDelete(){const entries=selectedEntries(),folders=entries.filter(entry=>entry.kind==='folder').length,warning=folders?` Selected folder${folders===1?'':'s'} and everything inside will be permanently deleted.`:' This permanently deletes the selected files from your vault.';dialog({title:'Delete selected entries?',description:`${entries.length} selected ${entries.length===1?'entry':'entries'}.${warning} There is no trash or undo.`,submit:'Delete permanently',danger:true,action:async()=>{const {deleted}=await request('/api/entries/bulk-delete',{method:'POST',body:{ids:entries.map(entry=>entry.id)}});clearSelection();notice(`Deleted ${deleted} ${deleted===1?'entry':'entries'} from your vault.`);}});}
+function clickDownload(href,name){const anchor=element('a');anchor.href=href;anchor.hidden=true;if(name)anchor.download=name;document.body.append(anchor);anchor.click();anchor.remove();}
+async function bulkDownload(){const entries=selectedEntries();if(!entries.length||downloadBusy)return;downloadBusy=true;renderSelection();try{const {url}=await request('/api/downloads',{method:'POST',body:{ids:entries.map(entry=>entry.id)}});clickDownload(url);}catch(error){notice(`Could not start download: ${error.message}`,true);}finally{downloadBusy=false;if(isUnlocked())renderSelection();}}
+function renderSecurity(){const control=$('#passkey-switch');if(!control)return;control.checked=passkeyEnabled;control.disabled=securityBusy;$('#passkey-status').textContent=securityBusy?'Updating…':passkeyEnabled?'On':'Off';$('#generate-recovery').disabled=securityBusy;}
+async function loadSecurity(){try{const status=await request('/api/passkey');passkeyEnabled=status.enabled;securityBusy=false;renderSecurity();}catch(error){if(isUnlocked()){securityBusy=true;renderSecurity();notice(`Could not load security settings: ${error.message}`,true);}}}
+async function enablePasskey(){securityBusy=true;renderSecurity();try{
+  if(!window.PublicKeyCredential||!window.navigator.credentials?.create||!window.navigator.credentials?.get)throw new Error('WebAuthn is unavailable on this browser or device.');
+  await enroll((path,body)=>request(path,{method:'POST',body:body||{}}));passkeyEnabled=true;notice('Passkey enabled.');
+}catch(error){passkeyEnabled=false;notice(`Could not enable passkey: ${error.message}`,true);}finally{securityBusy=false;if(isUnlocked())renderSecurity();}}
+function disablePasskey(){renderSecurity();dialog({title:'Turn off passkey?',description:'You will need your password or recovery file the next time you unlock this vault.',submit:'Turn off',danger:true,action:async()=>{securityBusy=true;renderSecurity();try{await request('/api/passkey',{method:'DELETE'});passkeyEnabled=false;notice('Passkey disabled.');}catch(error){passkeyEnabled=true;notice(`Could not disable passkey: ${error.message}`,true);throw error;}finally{securityBusy=false;if(isUnlocked())renderSecurity();}}});}
+async function generateRecoveryImage(){if(securityBusy)return;securityBusy=true;renderSecurity();try{const image=await requestBlob('/api/recovery-image'),url=URL.createObjectURL(image);try{clickDownload(url,'Vault recovery file.png');}finally{URL.revokeObjectURL(url);}notice('Recovery file downloaded. Any previous file is revoked.');}catch(error){notice(`Could not generate recovery file: ${error.message}`,true);}finally{securityBusy=false;if(isUnlocked())renderSecurity();}}
 let uploadQueue=Promise.resolve();
 function upload(files){
   if(!isUnlocked())return;const destination=parentId;
@@ -104,7 +115,8 @@ $('#action-form').onsubmit=async event=>{event.preventDefault();const generation
 for(const id of ['#dialog-close','#dialog-cancel'])$(id).onclick=closeActionDialog;
 $('#action-dialog').addEventListener('cancel',event=>{event.preventDefault();closeActionDialog();});
 $('#preview-close').onclick=clearPreview;$('#preview-dialog').addEventListener('cancel',event=>{event.preventDefault();clearPreview();});
-$('#select-all').onchange=event=>{if(event.target.checked)for(const entry of visibleEntries)selected.add(entry.id);else clearSelection();renderSelection();};$('#bulk-move').onclick=bulkMove;$('#bulk-delete').onclick=bulkDelete;$('#clear-selection').onclick=clearSelection;
+$('#select-all').onchange=event=>{if(event.target.checked)for(const entry of visibleEntries)selected.add(entry.id);else clearSelection();renderSelection();};$('#bulk-download').onclick=bulkDownload;$('#bulk-move').onclick=bulkMove;$('#bulk-delete').onclick=bulkDelete;$('#clear-selection').onclick=clearSelection;
+$('#passkey-switch').onchange=event=>event.target.checked?enablePasskey():disablePasskey();$('#generate-recovery').onclick=generateRecoveryImage;
 $('#sort').onchange=event=>{clearSelection();sort=event.target.value;render();};
 for(const mode of ['list','grid'])$(`#${mode}-view`).onclick=()=>{clearSelection();view=mode;for(const m of ['list','grid']){$(`#${m}-view`).classList.toggle('selected',m===view);$(`#${m}-view`).setAttribute('aria-pressed',String(m===view));}render();};
 for(const button of document.querySelectorAll('[data-category]'))button.onclick=()=>{if(!isUnlocked())return;clearSelection();category=button.dataset.category;parentId=null;query='';$('#search').value='';load();};
@@ -118,4 +130,4 @@ document.addEventListener('drop',event=>{event.preventDefault();if(!isUnlocked()
 async function heartbeat(){if(!isUnlocked())return;try{const response=await fetch('/api/heartbeat',{cache:'no-store',signal:AbortSignal.timeout(2000)});if(!response.ok)lockView();}catch{lockView();}}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)heartbeat();});
 window.addEventListener('pagehide',()=>{clearPreview();clearSelection();});
-try{await bootstrap();await load();if(isUnlocked())heartbeatTimer=setInterval(heartbeat,2000);}catch{lockView();}
+try{await bootstrap();await Promise.all([load(),loadSecurity()]);if(isUnlocked())heartbeatTimer=setInterval(heartbeat,2000);}catch{lockView();}

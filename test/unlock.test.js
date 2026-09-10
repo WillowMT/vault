@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { startEnrollmentServer, startLockedServer } from '../src/server/server.js';
+import { startEnrollmentServer, startLockedServer, startServer } from '../src/server/server.js';
 
 const passkey = {
   credentialId: Buffer.from('credential').toString('base64url'),
@@ -26,6 +26,22 @@ function post(app, path, value) {
     headers: { Origin: app.origin, 'Content-Type': 'application/json' },
     body: JSON.stringify(value)
   });
+}
+
+async function authorize(app) {
+  const response = await post(app, '/api/session', { token: new URL(app.launchUrl).hash.slice(1) });
+  const { csrfToken } = await response.json();
+  return { cookie: response.headers.get('set-cookie').split(';')[0], csrfToken };
+}
+
+function sessionFetch(app, session, path, { method = 'GET', value, csrf = true } = {}) {
+  const headers = { Cookie: session.cookie };
+  if (!['GET', 'HEAD'].includes(method)) {
+    headers.Origin = app.origin;
+    if (csrf) headers['X-CSRF-Token'] = session.csrfToken;
+  }
+  if (value !== undefined) headers['Content-Type'] = 'application/json';
+  return fetch(app.origin + path, { method, headers, body: value === undefined ? undefined : JSON.stringify(value) });
 }
 
 test('locked server advertises localhost and restricts assets and vault APIs', async t => {
@@ -231,4 +247,65 @@ test('closing during enrollment waits before clearing the private password copy'
   await response;
   assert.deepEqual(passwordCopy, Buffer.alloc(passwordCopy.length));
   assert.equal(password.toString(), 'recovery password');
+});
+
+test('ready-mode passkey status and disable require an authenticated CSRF-protected session', async t => {
+  const vault = fakeVault();
+  let disabled = 0;
+  vault.passkeyStatus = () => ({ enabled: true });
+  vault.disablePasskey = async () => { disabled++; };
+  const app = await startServer(vault, { passkeyService: {} });
+  t.after(() => app.close());
+
+  assert.equal((await fetch(app.origin + '/api/passkey')).status, 401);
+  const session = await authorize(app);
+  const status = await sessionFetch(app, session, '/api/passkey');
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), { enabled: true });
+  assert.equal((await sessionFetch(app, session, '/api/passkey', { method: 'DELETE', csrf: false })).status, 403);
+  const response = await sessionFetch(app, session, '/api/passkey', { method: 'DELETE' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { enabled: false });
+  assert.equal(disabled, 1);
+});
+
+test('ready-mode registration confirms a passkey through setPasskey', async t => {
+  const vault = fakeVault(), calls = [], prfOutput = Buffer.alloc(32, 7);
+  vault.passkeyStatus = () => ({ enabled: false });
+  vault.setPasskey = async (metadata, prf) => calls.push([metadata, prf]);
+  const metadata = { ...passkey, prfOutput, newCounter: 4 };
+  const service = {
+    async beginRegistration(value) { calls.push(value); return { challenge: 'registration' }; },
+    async verifyRegistration(value) { calls.push(value); return { challenge: 'confirmation' }; },
+    async verifyRegistrationConfirmation(credential, prf) { calls.push([credential, prf]); return metadata; }
+  };
+  const app = await startServer(vault, { passkeyService: service });
+  t.after(() => app.close());
+  const session = await authorize(app);
+
+  assert.equal((await sessionFetch(app, session, '/api/passkey/registration/options', { method: 'POST', value: {} })).status, 200);
+  assert.equal((await sessionFetch(app, session, '/api/passkey/registration/verify', { method: 'POST', value: { credential: { id: 'new' } } })).status, 200);
+  const response = await sessionFetch(app, session, '/api/passkey/registration/confirm', { method: 'POST', value: { credential: { id: 'new' }, prf: 'result' } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { enabled: true });
+  assert.deepEqual(calls.at(-1)[0], passkey);
+  assert.equal(calls.at(-1)[1], prfOutput);
+});
+
+test('ready mode returns a committed recovery image as a non-cacheable attachment', async t => {
+  const vault = fakeVault(), image = Buffer.from('\x89PNG recovery');
+  let generated = 0;
+  vault.createRecoveryImage = async () => { generated++; return image; };
+  const app = await startServer(vault, { passkeyService: {} });
+  t.after(() => app.close());
+  const session = await authorize(app);
+
+  assert.equal((await fetch(app.origin + '/api/recovery-image', { method: 'POST', headers: { Origin: app.origin } })).status, 401);
+  const response = await sessionFetch(app, session, '/api/recovery-image', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/png');
+  assert.match(response.headers.get('content-disposition'), /^attachment;/);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), image);
+  assert.equal(generated, 1);
 });

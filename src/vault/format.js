@@ -1,6 +1,7 @@
 export const DATA_VERSION = 1;
 export const LEGACY_HEADER_VERSION = 1;
-export const HEADER_VERSION = 2;
+export const PASSKEY_HEADER_VERSION = 2;
+export const HEADER_VERSION = 3;
 // Kept for existing data-format consumers. New code should use DATA_VERSION.
 export const VERSION = 1;
 export const CHUNK = 1024 * 1024;

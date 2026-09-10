@@ -144,3 +144,28 @@ test('export rejects vault headers from a newer format version',async t=>{
   await writeFile(join(directory,'catalog.enc'),Buffer.from('catalog'));
   await assert.rejects(()=>exportVault({directory,output:join(root,'a.scvault')}),/newer|unsupported/i);
 });
+
+test('archive round-trips enabled and disabled v3 headers',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-v3-archive-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  for(const enabled of [true,false]){
+    const source=join(root,enabled?'enabled':'disabled');
+    const password=Buffer.from('v3 archive passphrase');
+    const vault=await createVault(source,password);
+    await vault.disablePasskey();
+    if(enabled)await vault.setPasskey({
+      credentialId:Buffer.from('archive credential').toString('base64url'),
+      publicKey:Buffer.from('archive public key').toString('base64url'),
+      counter:0,
+      transports:['internal'],
+      prfSalt:Buffer.alloc(32,31).toString('base64')
+    },Buffer.alloc(32,33));
+    await vault.close();
+    const archive=join(root,`${enabled?'enabled':'disabled'}.scvault`),restored=join(root,`${enabled?'enabled':'disabled'}-restored`);
+    await exportVault({directory:source,output:archive});
+    await importVault({archive,directory:restored});
+    const header=JSON.parse(await readFile(join(restored,'vault.json'),'utf8'));
+    assert.equal(header.version,3);
+    assert.equal(Boolean(header.passkey),enabled);
+  }
+});

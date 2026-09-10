@@ -13,6 +13,15 @@ export async function request(path,{method='GET',body,headers={}}={}){
     return data;
   }finally{controllers.delete(controller);}
 }
+export async function requestBlob(path,{method='POST'}={}){
+  const controller=new AbortController();controllers.add(controller);
+  try{
+    const response=await fetch(path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-CSRF-Token':csrfToken||''}});
+    if(response.status===401){onLock();throw new Error('Vault is locked');}
+    if(!response.ok){let data;try{data=await response.json();}catch{}throw new Error(data?.error||'The request failed.');}
+    return response.blob();
+  }finally{controllers.delete(controller);}
+}
 export async function bootstrap(){
   const token=location.hash.slice(1);history.replaceState(null,'',location.pathname);
   const data=token?await request('/api/session',{method:'POST',body:{token}}):await request('/api/session');

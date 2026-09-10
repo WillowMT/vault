@@ -6,12 +6,22 @@ export async function deriveKey(password, salt) {
   if (salt.length !== 32) throw new Error('Invalid salt');
   return scryptAsync(password, salt, 32, KDF);
 }
-export function derivePasskeyKey(prfOutput, salt, vaultId, credentialId) {
+export function derivePasskeyKey(prfOutput, salt, vaultId, credentialId, wrapVersion = HEADER_VERSION) {
   if (!Buffer.isBuffer(prfOutput) || prfOutput.length !== 32) throw new Error('Invalid WebAuthn PRF output');
   if (!Buffer.isBuffer(salt) || salt.length !== 32) throw new Error('Invalid passkey PRF salt');
   if (typeof vaultId !== 'string' || typeof credentialId !== 'string') throw new Error('Invalid passkey context');
-  const info = Buffer.from(JSON.stringify(['secretcli-passkey-wrap', HEADER_VERSION, vaultId, credentialId]));
+  if (wrapVersion !== 2 && wrapVersion !== 3) throw new Error('Invalid passkey wrap version');
+  const info = Buffer.from(JSON.stringify(['secretcli-passkey-wrap', wrapVersion, vaultId, credentialId]));
   const input = Buffer.from(prfOutput);
+  try { return Buffer.from(hkdfSync('sha256', input, salt, info, 32)); }
+  finally { input.fill(0); }
+}
+export async function deriveRecoveryImageKey(secret, salt, vaultId) {
+  if (!Buffer.isBuffer(secret) || secret.length !== 32) throw new Error('Invalid recovery image secret');
+  if (!Buffer.isBuffer(salt) || salt.length !== 32) throw new Error('Invalid recovery image salt');
+  if (typeof vaultId !== 'string') throw new Error('Invalid recovery image context');
+  const info = Buffer.from(JSON.stringify(['secretcli-image-key-wrap', 3, vaultId]));
+  const input = Buffer.from(secret);
   try { return Buffer.from(hkdfSync('sha256', input, salt, info, 32)); }
   finally { input.fill(0); }
 }

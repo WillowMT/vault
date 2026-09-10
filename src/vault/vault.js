@@ -1,6 +1,7 @@
 import { readdir, unlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { createCatalog, loadCatalog, prepareCatalog } from './catalog.js';
 import { writeObject, readObject } from './objects.js';
 import { VaultError } from './format.js';
@@ -28,6 +29,7 @@ export async function prepareVault(path){
   return {version:prepared.version,vaultId:prepared.vaultId,passkey:prepared.passkey,
     unlockWithPassword:password=>unlock(()=>prepared.unlockWithPassword(password)),
     unlockWithPasskey:(prfOutput,newCounter)=>unlock(()=>prepared.unlockWithPasskey(prfOutput,newCounter)),
+    unlockWithRecoveryImage:image=>unlock(()=>prepared.unlockWithRecoveryImage(image)),
     close(){
       if(closePromise)return closePromise;
       closing=true;
@@ -44,7 +46,7 @@ export async function prepareVault(path){
 async function build(path,catalog){
   const directory=join(path,'objects');let entries=catalog.entries.map(e=>({...e}));
   let closing=false,closed=false,queue=Promise.resolve(),closePromise;
-  const uploads=new Set(), readers=new Map(), deferred=new Set();
+  const uploads=new Set(), readers=new Map(), deferred=new Set(), exportSnapshots=new Set();
   try{
     const ids=new Set();
     for(const e of entries){
@@ -74,7 +76,12 @@ async function build(path,catalog){
     const work=queue.then(async()=>{active();const next=entries.map(e=>({...e}));const value=fn(next);await catalog.save(next);entries=next;return value;});
     queue=work.catch(()=>{});return work;
   }
+  function mutateHeader(fn){
+    try{active();}catch(error){return Promise.reject(error);}
+    const work=queue.then(fn);queue=work.catch(()=>{});return work;
+  }
   async function discard(id){if(readers.has(id)){deferred.add(id);return;}await unlink(join(directory,id)).catch(e=>{if(e.code!=='ENOENT')throw e;});}
+  async function releaseReader(id){const remaining=readers.get(id)-1;if(remaining)readers.set(id,remaining);else{readers.delete(id);if(deferred.delete(id))await discard(id);}}
   const api={
     list(parentId=null,query='',{recursive=false}={}){active();parent(parentId);return entries.filter(e=>query?e.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()):recursive||e.parentId===parentId).map(publicEntry);},
     folders(){active();return entries.filter(e=>e.kind==='folder').map(publicEntry);},
@@ -131,7 +138,82 @@ async function build(path,catalog){
       active();const e={...find(id)};if(e.kind!=='file')throw new VaultError('Cannot download a folder');
       readers.set(e.objectId,(readers.get(e.objectId)||0)+1);const key=Buffer.from(e.fileKey,'base64');
       try{for await(const bytes of readObject(directory,catalog.vaultId,e.objectId,key,e.size,start,end)){active();yield bytes;}}
-      finally{key.fill(0);const remaining=readers.get(e.objectId)-1;if(remaining)readers.set(e.objectId,remaining);else{readers.delete(e.objectId);if(deferred.delete(e.objectId))await discard(e.objectId);}}
+      finally{key.fill(0);await releaseReader(e.objectId);}
+    },
+    openExport(ids){
+      try{active();}catch(error){return Promise.reject(error);}
+      const work=queue.then(()=>{
+        active();
+        if(!Array.isArray(ids)||ids.length===0||ids.some(id=>typeof id!=='string'))throw new VaultError('Select a non-empty list of entry IDs');
+        const selectedIds=[...new Set(ids)],byId=new Map(entries.map(entry=>[entry.id,entry]));
+        const selected=selectedIds.map(id=>{const entry=byId.get(id);if(!entry)throw new VaultError('File or folder not found',404);return entry;});
+        const selectedSet=new Set(selectedIds),roots=[];
+        for(const entry of selected){
+          const seen=new Set([entry.id]);let covered=false;
+          for(let parentId=entry.parentId;parentId!==null;){
+            if(seen.has(parentId))throw new VaultError('Corrupt catalog hierarchy');
+            seen.add(parentId);
+            const ancestor=byId.get(parentId);
+            if(!ancestor||ancestor.kind!=='folder')throw new VaultError('Corrupt catalog hierarchy');
+            if(selectedSet.has(parentId))covered=true;
+            parentId=ancestor.parentId;
+          }
+          if(!covered)roots.push(entry);
+        }
+        const rootNames=new Set();
+        for(const root of roots){if(rootNames.has(root.name))throw new VaultError('Selected roots have a same name collision',409);rootNames.add(root.name);}
+        const children=new Map();
+        for(const entry of entries){if(entry.parentId!==null){const list=children.get(entry.parentId)||[];list.push(entry);children.set(entry.parentId,list);}}
+        const planned=[],visited=new Set(),visiting=new Set();
+        function walk(entry,prefix){
+          if(visiting.has(entry.id))throw new VaultError('Corrupt catalog hierarchy');
+          if(visited.has(entry.id))return;
+          visiting.add(entry.id);visited.add(entry.id);
+          const path=`${prefix}${entry.name}${entry.kind==='folder'?'/':''}`;
+          if(Buffer.byteLength(path)>0xffff)throw new VaultError('Export path is too long');
+          planned.push({entry,path});
+          if(entry.kind==='folder')for(const child of children.get(entry.id)||[])walk(child,path);
+          visiting.delete(entry.id);
+        }
+        for(const root of roots)walk(root,'');
+
+        const files=planned.filter(item=>item.entry.kind==='file').map(item=>({
+          entry:item.entry,
+          path:item.path,
+          key:Buffer.from(item.entry.fileKey,'base64')
+        }));
+        for(const file of files)readers.set(file.entry.objectId,(readers.get(file.entry.objectId)||0)+1);
+        const streams=new Set();let released=false,releasePromise;
+        const release=()=>{
+          if(releasePromise)return releasePromise;
+          released=true;
+          releasePromise=(async()=>{
+            for(const stream of streams)stream.destroy();
+            for(const file of files)file.key.fill(0);
+            await Promise.all(files.map(file=>releaseReader(file.entry.objectId)));
+            exportSnapshots.delete(release);
+          })();
+          return releasePromise;
+        };
+        const fileById=new Map(files.map(file=>[file.entry.id,file]));
+        const snapshotEntries=planned.map(item=>{
+          if(item.entry.kind==='folder')return {kind:'folder',path:item.path};
+          const file=fileById.get(item.entry.id);
+          return {kind:'file',path:item.path,size:item.entry.size,open(){
+            if(released||closing||closed)throw new VaultError('Export snapshot is released');
+            const stream=Readable.from((async function*(){
+              for await(const bytes of readObject(directory,catalog.vaultId,file.entry.objectId,file.key,file.entry.size)){
+                if(released||closing||closed)throw new VaultError('Vault is locked',401);
+                yield bytes;
+              }
+            })());
+            streams.add(stream);stream.once('close',()=>streams.delete(stream));return stream;
+          }};
+        });
+        exportSnapshots.add(release);
+        return {entries:snapshotEntries,release};
+      });
+      queue=work.catch(()=>{});return work;
     },
     enrollPasskey(password,metadata,prfOutput){
       try{active();}catch(error){return Promise.reject(error);}
@@ -140,9 +222,17 @@ async function build(path,catalog){
       const work=queue.then(async()=>{active();return catalog.enrollPasskey(password,snapshot,prf);}).finally(()=>{if(prf!==prfOutput)prf.fill(0);});
       queue=work.catch(()=>{});return work;
     },
+    createRecoveryImage(){return mutateHeader(()=>catalog.createRecoveryImage());},
+    disablePasskey(){return mutateHeader(()=>catalog.disablePasskey());},
+    setPasskey(metadata,prfOutput){
+      const snapshot=metadata&&{...metadata,transports:Array.isArray(metadata.transports)?[...metadata.transports]:metadata.transports};
+      const prf=Buffer.isBuffer(prfOutput)?Buffer.from(prfOutput):prfOutput;
+      return mutateHeader(()=>catalog.setPasskey(snapshot,prf)).finally(()=>{if(Buffer.isBuffer(prf)&&prf!==prfOutput)prf.fill(0);});
+    },
+    passkeyStatus(){active();return catalog.passkeyStatus();},
     close(){
       if(closePromise)return closePromise;closing=true;
-      closePromise=(async()=>{for(const job of uploads)job.controller.abort();await Promise.all([...uploads].map(j=>j.finished));await queue;entries=[];closed=true;await catalog.close();})();return closePromise;
+      closePromise=(async()=>{for(const job of uploads)job.controller.abort();await Promise.all([...uploads].map(j=>j.finished));await queue;await Promise.all([...exportSnapshots].map(release=>release()));entries=[];closed=true;await catalog.close();})();return closePromise;
     }
   };
   Object.defineProperty(api,'vaultId',{value:catalog.vaultId,enumerable:true});

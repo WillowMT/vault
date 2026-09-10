@@ -163,7 +163,7 @@ async function streamEntry(handle, size, { sink, hash }) {
 
 function supportedHeader(header) {
   return Boolean(header && typeof header === 'object'
-    && (header.version === 1 || header.version === 2)
+    && (header.version === 1 || header.version === 2 || header.version === 3)
     && typeof header.vaultId === 'string'
     && (header.version === 1 || header.dataVersion === DATA_VERSION));
 }
@@ -291,7 +291,7 @@ export async function importVault({ archive, directory }) {
           let parsed;
           try { parsed = JSON.parse(body.toString('utf8')); } catch { throw corrupt('manifest.json is not valid JSON'); }
           if (!parsed || typeof parsed !== 'object' || parsed.format !== 1 || !UUID_PATTERN.test(parsed.vaultId) || !Array.isArray(parsed.files)) throw corrupt('unsupported manifest');
-          if (parsed.headerVersion !== 1 && parsed.headerVersion !== 2) throw new VaultError('This archive uses a newer Vault format. Update Vault and try again.');
+          if (parsed.headerVersion !== 1 && parsed.headerVersion !== 2 && parsed.headerVersion !== 3) throw new VaultError('This archive uses a newer Vault format. Update Vault and try again.');
           if (parsed.dataVersion !== DATA_VERSION) throw new VaultError('This archive uses a newer Vault data format. Update Vault and try again.');
           let declaredBytes = 0n;
           for (const file of parsed.files) {
