@@ -1,11 +1,11 @@
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat, readFile, rm } from 'node:fs/promises';
 import { resolve, join, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createVault,unlockVault,prepareVault } from '../vault/vault.js';
 import { exportVault,importVault } from '../vault/archive.js';
-import { loadRegistry,saveRegistry,resolveReference,registerVault,touchVault,forgetVault } from '../vault/registry.js';
+import { loadRegistry,resolveReference,registerVault,touchVault,forgetVault,updateRegistry } from '../vault/registry.js';
 import { startLockedServer,startEnrollmentServer } from '../server/server.js';
 import { readPassword,readText } from './prompt.js';
 import { banner,renderStatus,busy } from './view.js';
@@ -51,24 +51,23 @@ function relativeTime(timestamp){
 }
 
 async function vaultsCommand({config,stdout,registryPath}){
-  if(config.help){stdout.write('Usage: secretcli vaults [--add <path> [name]] [--remove <name>]\n\n  (no flags)           List registered vaults\n  --add <path> [name]  Register an existing vault directory\n  --remove <name>      Remove a vault from the list without deleting its files\n');return;}
+  if(config.help){stdout.write('Usage: vault vaults [--add <path> [name]] [--remove <name>]\n\n  (no flags)           List registered vaults\n  --add <path> [name]  Register an existing vault directory\n  --remove <name>      Remove a vault from the list without deleting its files\n');return;}
   const {registry,warning}=await loadRegistry(registryPath);
+  if(warning&&(config.remove||config.add))throw new Error(`${warning} Repair or remove it before changing the vault list.`);
   if(warning)stdout.write(`  ⚠ ${warning}\n`);
   if(config.remove){
-    const updated=forgetVault(registry,config.remove);
-    await saveRegistry(registryPath,updated);
+    await updateRegistry(registryPath,current=>({registry:forgetVault(current,config.remove)}));
     stdout.write(`  Removed “${config.remove}” from the vault list. Files on disk were not touched.\n`);
     return;
   }
   if(config.add){
     const directory=resolve(config.positional[0]??'');
     try{await readFile(join(directory,'vault.json'));}catch{throw new Error(`No vault found at ${directory} — a vault directory contains vault.json`);}
-    const {registry:updated,entry}=await registerVault(registry,directory,config.positional[1]);
-    await saveRegistry(registryPath,updated);
+    const {entry}=await updateRegistry(registryPath,current=>registerVault(current,directory,config.positional[1]));
     stdout.write(`  Registered “${entry.name}” → ${entry.path}\n`);
     return;
   }
-  if(!registry.vaults.length){stdout.write('  No vaults registered yet.\n  SecretCLI creates one on first launch, or register one with: secretcli vaults --add <path> [name]\n');return;}
+  if(!registry.vaults.length){stdout.write('  No vaults registered yet.\n  Vault creates one on first launch, or register one with: vault vaults --add <path> [name]\n');return;}
   const rows=await Promise.all(registry.vaults.map(async entry=>{
     let missing=false;try{await lstat(entry.path);}catch{missing=true;}
     const opened=entry.lastOpenedAt?relativeTime(entry.lastOpenedAt):'never';
@@ -80,9 +79,11 @@ async function vaultsCommand({config,stdout,registryPath}){
 async function rememberVault(registryPath,registry,path,forceRegister){
   try{
     const target=resolve(path);
-    if(forceRegister&&!registry.vaults.some(entry=>entry.path===target))registry=(await registerVault(registry,target)).registry;
-    const updated=touchVault(registry,target);
-    if(JSON.stringify(updated)!==JSON.stringify(registry)){registry=updated;await saveRegistry(registryPath,registry);}
+    const result=await updateRegistry(registryPath,async current=>{
+      if(forceRegister&&!current.vaults.some(entry=>entry.path===target))current=(await registerVault(current,target)).registry;
+      return {registry:touchVault(current,target)};
+    });
+    registry=result.registry;
   }catch{}
   return registry;
 }
@@ -106,8 +107,8 @@ async function resolveVaultLocation(reference,registryPath){
 }
 
 async function exportCommand({config,stdout,registryPath}){
-  if(config.help){stdout.write('Usage: secretcli export [--vault <name|directory>] --to <archive.scvault>\n\n  Export a vault to a single encrypted archive file. The vault must not be open.\n  The archive contains only encrypted data and needs no password to store.\n');return;}
-  if(!config.to)throw new Error('secretcli export needs --to <archive.scvault>');
+  if(config.help){stdout.write('Usage: vault export [--vault <name|directory>] --to <archive.scvault>\n\n  Export a vault to a single encrypted archive file. The vault must not be open.\n  The archive contains only encrypted data and needs no password to store.\n');return;}
+  if(!config.to)throw new Error('vault export needs --to <archive.scvault>');
   const directory=config.vault?await resolveVaultLocation(config.vault,registryPath):await defaultVaultPath(registryPath);
   if(!directory)throw new Error('No vaults registered. Open a vault first, or pass --vault <directory>.');
   const output=resolve(config.to);
@@ -116,20 +117,28 @@ async function exportCommand({config,stdout,registryPath}){
 }
 
 async function importCommand({config,stdout,registryPath}){
-  if(config.help){stdout.write('Usage: secretcli import <archive.scvault> --out <directory> [--name <name>]\n\n  Restore an exported archive into a new vault directory and register it.\n  Unlock the restored vault with the original recovery password or passkey.\n');return;}
-  if(!config.positional[0])throw new Error('Usage: secretcli import <archive.scvault> --out <directory> [--name <name>]');
-  if(!config.out)throw new Error('secretcli import needs --out <directory>');
+  if(config.help){stdout.write('Usage: vault import <archive.scvault> --out <directory> [--name <name>]\n\n  Restore an exported archive into a new vault directory and register it.\n  Unlock the restored vault with the original recovery password or passkey.\n');return;}
+  if(!config.positional[0])throw new Error('Usage: vault import <archive.scvault> --out <directory> [--name <name>]');
+  if(!config.out)throw new Error('vault import needs --out <directory>');
   const archive=resolve(config.positional[0]),directory=resolve(config.out);
+  try { await lstat(directory);throw new Error(`${directory} already exists`); }
+  catch(error) { if(error.code!=='ENOENT')throw error; }
+  const loaded=await loadRegistry(registryPath);
+  if(loaded.warning)throw new Error(`${loaded.warning} Repair or remove it before importing a vault.`);
+  await registerVault(loaded.registry,directory,config.name);
   const {manifest}=await importVault({archive,directory});
-  stdout.write(`  Imported ${manifest.files.length} files into ${directory}\n`);
+  let registration;
   try{
-    const {registry}=await loadRegistry(registryPath);
-    const {registry:updated,entry}=await registerVault(registry,directory,config.name);
-    await saveRegistry(registryPath,updated);
-    stdout.write(`  Registered as “${entry.name}”. Open it with: secretcli --vault ${entry.name}\n`);
+    registration=await updateRegistry(registryPath,current=>registerVault(current,directory,config.name));
   }catch(error){
-    stdout.write(`  ⚠ The vault could not be registered in your vault list: ${error.message}\n`);
+    const persisted=await loadRegistry(registryPath);
+    const entry=persisted.registry.vaults.find(entry=>entry.path===directory),registered=Boolean(entry);
+    if(!registered)await rm(directory,{recursive:true,force:true});
+    if(!registered)throw new Error(`The imported vault could not be registered: ${error.message}`);
+    registration={registry:persisted.registry,entry};
   }
+  stdout.write(`  Imported ${manifest.files.length} files into ${directory}\n`);
+  stdout.write(`  Registered as “${registration.entry.name}”. Open it with: vault --vault ${registration.entry.name}\n`);
 }
 
 export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout=process.stdout,stderr=process.stderr,passwordReader=readPassword,opener=openBrowser,onReady,createVault:create=createVault,unlockVault:unlock=unlockVault,prepareVault:prepare=prepareVault,startLockedServer:startLocked=startLockedServer,startEnrollmentServer:startEnrollment=startEnrollmentServer,registryPath=REGISTRY_DEFAULT}={}){
@@ -137,7 +146,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
   if(config.mode==='vaults')return vaultsCommand({config,stdout,registryPath});
   if(config.mode==='export')return exportCommand({config,stdout,registryPath});
   if(config.mode==='import')return importCommand({config,stdout,registryPath});
-  if(config.help){stdout.write('SecretCLI — a local encrypted drive\n\nUsage: secretcli [--vault <name|directory>] [--no-open]\n       secretcli vaults [--add <path> [name]] [--remove <name>]\n       secretcli export [--vault <name|directory>] --to <archive.scvault>\n       secretcli import <archive.scvault> --out <directory> [--name <name>]\n\n  --vault     Open a vault by list name or directory (omit to pick from your vaults)\n  --no-open   Start without opening the browser automatically\n  --help      Show this help\n\n  vaults      Manage your vault list\n  export      Copy a vault into one encrypted archive file\n  import      Restore an archive into a new vault\n\nKeep this terminal running. Ctrl+C locks the vault and stops the website.\n');return;}
+  if(config.help){stdout.write('Vault — a local encrypted drive\n\nUsage: vault [--vault <name|directory>] [--no-open]\n       vault vaults [--add <path> [name]] [--remove <name>]\n       vault export [--vault <name|directory>] --to <archive.scvault>\n       vault import <archive.scvault> --out <directory> [--name <name>]\n\n  --vault     Open a vault by list name or directory (omit to pick from your vaults)\n  --no-open   Start without opening the browser automatically\n  --help      Show this help\n\n  vaults      Manage your vault list\n  export      Copy a vault into one encrypted archive file\n  import      Restore an archive into a new vault\n\nKeep this terminal running. Ctrl+C locks the vault and stops the website.\n');return;}
   const color=Boolean(stdout.isTTY&&!process.env.NO_COLOR);
   stdout.write(banner(color));
   const abort=new AbortController();let vault,prepared,app,timer,lines=0,exiting=false,finished,locked=false,enrolling=false;
@@ -188,6 +197,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
     }else{
       const entry=resolveReference(registry,config.vault);
       config.path=entry?entry.path:resolve(config.vault);
+      if(!entry){try{await lstat(config.path);}catch(error){if(error.code==='ENOENT')registerNew=true;else throw error;}}
     }
     let exists=true;try{await lstat(config.path);}catch(error){if(error.code==='ENOENT')exists=false;else throw error;}
     if(!exists)stdout.write('  Create your private vault\n  Choose at least 12 characters for your recovery password.\n\n');
@@ -216,7 +226,7 @@ export async function run({argv=process.argv.slice(2),stdin=process.stdin,stdout
     }
     if(exiting){await app.close();await vault?.close();return;}
     if(stdin.isTTY){stdin.setRawMode(true);stdin.resume();stdin.on('data',keys);stdin.once('end',signalStop);stdin.once('close',signalStop);}
-    registry=await rememberVault(registryPath,registry,config.path,registerNew);
+    if(!warning)registry=await rememberVault(registryPath,registry,config.path,registerNew);
     draw();if(stdout.isTTY)timer=setInterval(draw,60000);
     await onReady?.(app);
     if(config.open)void launch();

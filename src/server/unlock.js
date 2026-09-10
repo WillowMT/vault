@@ -7,20 +7,20 @@ export function restrictedPage(mode) {
     ? 'You can finish setup from the terminal at any time.'
     : 'Or press R in the terminal to unlock with your recovery password.';
   return Buffer.from(`<!doctype html>
-<html lang="en">
+<html lang="en" class="unlock-page-root">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#202e28">
-  <title>${heading} - SecretCLI</title>
+  <title>${heading} - Vault</title>
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/unlock.js"></script>
 </head>
 <body data-mode="${mode}">
 <main class="unlock-shell">
   <section class="unlock-card">
-    <div class="unlock-brand"><span class="brand-mark">◆</span>secret<span class="brand-suffix">cli</span></div>
+    <div class="unlock-brand"><span class="brand-mark">◆</span>vault<span class="brand-suffix">.</span></div>
     <p class="unlock-tagline">A little space. Only yours.</p>
     <p class="unlock-lede">${lede}</p>
     <h1>${heading}</h1>

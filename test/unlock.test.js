@@ -150,7 +150,7 @@ test('enrollment verifies attestation then confirmation before enrolling and aut
   assert.deepEqual(calls[0][1], {
     userID: Buffer.from(vault.vaultId),
     userName: vault.vaultId,
-    userDisplayName: 'SecretCLI vault'
+    userDisplayName: 'Vault'
   });
   assert.deepEqual(calls[3][2], passkey);
   assert.equal(calls[3][3], prfOutput);

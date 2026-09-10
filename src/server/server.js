@@ -163,7 +163,7 @@ async function start({ initialVault, prepared, initialMode, recoveryPassword, pa
         const options = await passkeys.beginRegistration({
           userID: Buffer.from(vault.vaultId),
           userName: vault.vaultId,
-          userDisplayName: 'SecretCLI vault'
+          userDisplayName: 'Vault'
         });
         json(res, 200, options);
       } catch {

@@ -81,7 +81,7 @@ function prfResult(credential){
 
 async function request(path,body={}){
   const response=await window.fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!response.ok)throw new Error('REQUEST_FAILED');
+  if(!response.ok){let detail;try{detail=(await response.json()).error;}catch{}throw new Error(typeof detail==='string'?detail:'REQUEST_FAILED');}
   return response.json();
 }
 
@@ -105,6 +105,8 @@ async function enroll(){
 function errorMessage(error){
   if(error.message==='PRF_UNAVAILABLE')return 'Passkeys with the PRF extension are unavailable. Unlock the vault from the terminal to recover access.';
   if(error.name==='NotAllowedError'||error.message==='CANCELLED')return 'Passkey request was cancelled.';
+  if(error.name==='NotSupportedError'||error.name==='SecurityError')return 'This browser or device cannot use the required passkey. Press R in the terminal to unlock with your recovery password.';
+  if(['Could not start passkey enrollment','Passkey enrollment failed','Passkey unlock failed','Vault is locked'].includes(error.message))return `${error.message}. Press R in the terminal to use your recovery password.`;
   return 'Passkey operation failed. Try again or unlock from the terminal.';
 }
 

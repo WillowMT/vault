@@ -7,14 +7,17 @@ async function limitedText(response){
   const decoder=new TextDecoder();let text='',total=0,done=false;
   while(!done&&total<=1048576){const chunk=await reader.read();done=chunk.done;if(chunk.value){total+=chunk.value.length;text+=decoder.decode(chunk.value,{stream:true});}}
   reader.cancel().catch(()=>{});
+  if(done)text+=decoder.decode();
   return done&&total<=1048576?text:`${text.slice(0,1048576)}\n\n… (truncated)`;
 }
-function textPreview(content,entry,url){
+function textPreview(content,url,signal,generation){
   const pre=document.createElement('pre');pre.className='text-preview';content.append(pre);
-  fetch(url,{credentials:'same-origin',cache:'no-store'}).then(async response=>{
+  fetch(url,{credentials:'same-origin',cache:'no-store',signal}).then(async response=>{
+    if(signal.aborted||generation!==previewGeneration)return;
     if(!response.ok){pre.textContent='Could not load this file. You can still download it.';return;}
-    pre.textContent=await limitedText(response);
-  }).catch(()=>{pre.textContent='Could not load this file. You can still download it.';});
+    const text=await limitedText(response);
+    if(!signal.aborted&&generation===previewGeneration&&pre.isConnected)pre.textContent=text;
+  }).catch(error=>{if(error.name!=='AbortError'&&!signal.aborted&&generation===previewGeneration&&pre.isConnected)pre.textContent='Could not load this file. You can still download it.';});
 }
 export function pdfPreviewMode(ua=navigator?.userAgent||''){return /safari/i.test(ua)&&!/chrome|chromium|crios|fxios|edg|android/i.test(ua)?'tab':'frame';}
 function voiceNote(media){
@@ -27,7 +30,7 @@ function voiceNote(media){
   head.append(label,speed);wrap.append(head,media);return wrap;
 }
 export function bytes(size){if(size===0)return '0 B';const units=['B','KB','MB','GB','TB'],index=Math.min(4,Math.floor(Math.log(size)/Math.log(1024)));return `${Number((size/1024**index).toFixed(index?1:0))} ${units[index]}`;}
-let gallery=[],galleryKeys=null;
+let gallery=[],galleryKeys=null,previewGeneration=0,previewAbort,slideshowFullscreen=false;
 export function setGallery(entries){gallery=entries;}
 function galleryEntries(entry){return gallery.filter(item=>fileCategory(item)===fileCategory(entry));}
 function galleryNav(entry,dir){
@@ -38,13 +41,17 @@ function galleryNav(entry,dir){
   button.onclick=()=>showPreview(entries[(index+dir+entries.length)%entries.length]);
   return button;
 }
-function toggleFullscreen(){
-  if(document.fullscreenElement)document.exitFullscreen?.();
-  else document.documentElement.requestFullscreen?.();
+async function toggleFullscreen(){
+  const generation=previewGeneration,dialog=document.querySelector('#preview-dialog');
+  try{
+    if(document.fullscreenElement){if(slideshowFullscreen)await document.exitFullscreen?.();slideshowFullscreen=false;}
+    else if(document.documentElement.requestFullscreen){await document.documentElement.requestFullscreen();if(generation!==previewGeneration||!dialog?.open){await document.exitFullscreen?.();return;}slideshowFullscreen=Boolean(document.fullscreenElement);}
+  }catch{slideshowFullscreen=false;}
 }
-export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;if(galleryKeys){dialog.removeEventListener('keydown',galleryKeys);galleryKeys=null;}dialog.classList.remove('slideshow');for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
+export function clearPreview(){const dialog=document.querySelector('#preview-dialog');if(!dialog)return;previewGeneration++;previewAbort?.abort();previewAbort=undefined;if(slideshowFullscreen&&document.fullscreenElement){const exiting=document.exitFullscreen?.();exiting?.catch(()=>{});}slideshowFullscreen=false;if(galleryKeys){dialog.removeEventListener('keydown',galleryKeys);galleryKeys=null;}dialog.classList.remove('slideshow');for(const media of dialog.querySelectorAll('audio,video')){media.onerror=null;media.pause();media.removeAttribute('src');media.load();}dialog.querySelector('#preview-content').replaceChildren();dialog.querySelector('#preview-title').textContent='';dialog.querySelector('#preview-meta').textContent='';dialog.querySelector('#preview-download').removeAttribute('href');dialog.close();}
 export function showPreview(entry){
   clearPreview();const dialog=document.querySelector('#preview-dialog'),content=document.querySelector('#preview-content');
+  const generation=previewGeneration;previewAbort=new AbortController();const {signal}=previewAbort;
   document.querySelector('#preview-title').textContent=entry.name;document.querySelector('#preview-meta').textContent=`${bytes(entry.size)} · ${entry.mime||'File'}`;
   const url=`/api/files/${entry.id}/content`,download=document.querySelector('#preview-download');download.href=`/api/files/${entry.id}/download`;download.download=entry.name;
   const supported=new Set(['image/png','image/jpeg','image/gif','image/webp','image/avif','image/bmp','audio/mpeg','audio/mp4','audio/ogg','audio/wav','audio/webm','audio/flac','video/mp4','video/webm','video/ogg','video/quicktime']);
@@ -60,28 +67,27 @@ export function showPreview(entry){
       panel.append(p,open);content.append(panel);
     }
   }else if(isTextEntry(entry)){
-    textPreview(content,entry,url);
+    textPreview(content,url,signal,generation);
   }else if(supported.has(entry.mime)){
     const media=document.createElement(kind==='image'?'img':kind==='video'?'video':'audio');media.src=url;
-    if(kind==='image')media.alt=entry.name;else{media.controls=true;media.preload='metadata';}
-    media.onerror=()=>{const p=document.createElement('p');p.textContent='This browser cannot preview this format. You can still download the original.';content.replaceChildren(p);};
+    if(kind==='image')media.alt=entry.name;else{media.controls=true;media.preload=kind==='video'?'auto':'metadata';if(kind==='video'){media.autoplay=true;media.muted=true;media.defaultMuted=true;media.playsInline=true;}}
+    media.onerror=()=>{if(signal.aborted||generation!==previewGeneration)return;const p=document.createElement('p');p.textContent='This browser cannot preview this format. You can still download the original.';content.replaceChildren(p);};
     if(kind==='image'||kind==='video'){
       dialog.classList.add('slideshow');
       const stage=document.createElement('div');stage.className='gallery-stage';stage.append(media);
       const prev=galleryNav(entry,-1),next=galleryNav(entry,1);
-      if(prev&&next){
-        stage.append(prev,next);
-        galleryKeys=event=>{
-          if(event.key==='f'||event.key==='F'){event.preventDefault();toggleFullscreen();return;}
-          if(event.key!=='ArrowRight'&&event.key!=='ArrowLeft')return;
-          event.preventDefault();(event.key==='ArrowRight'?next:prev).click();
-        };
-        dialog.addEventListener('keydown',galleryKeys);
-      }
+      if(prev&&next)stage.append(prev,next);
+      galleryKeys=event=>{
+        if(event.target.closest?.('video,audio,button,a,input,select,textarea'))return;
+        if(event.key==='f'||event.key==='F'){event.preventDefault();void toggleFullscreen();return;}
+        if(!prev||!next||(event.key!=='ArrowRight'&&event.key!=='ArrowLeft'))return;
+        event.preventDefault();(event.key==='ArrowRight'?next:prev).click();
+      };
+      dialog.addEventListener('keydown',galleryKeys);
       const entries=galleryEntries(entry),index=entries.findIndex(item=>item.id===entry.id);
       const counter=document.createElement('span');counter.className='gallery-counter';counter.textContent=`${index+1} / ${entries.length}`;
       const fullscreen=document.createElement('button');fullscreen.type='button';fullscreen.className='gallery-fullscreen';fullscreen.setAttribute('aria-label','Toggle fullscreen');fullscreen.textContent='⛶';
-      fullscreen.onclick=toggleFullscreen;
+      fullscreen.onclick=()=>void toggleFullscreen();
       const bar=document.createElement('div');bar.className='gallery-bar';bar.append(counter,fullscreen);
       content.append(stage,bar);
     }else content.append(kind==='audio'?voiceNote(media):media);

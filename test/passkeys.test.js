@@ -66,7 +66,7 @@ async function reachRegistrationConfirmation(harness) {
   const creation = await harness.service.beginRegistration({
     userID: Buffer.from('vault-user'),
     userName: 'vault',
-    userDisplayName: 'SecretCLI vault'
+    userDisplayName: 'Vault'
   });
   const confirmation = await harness.service.verifyRegistration({ id: credentialId });
   return { creation, confirmation };
@@ -79,7 +79,7 @@ test('registration and confirmation options require a local platform passkey, UV
   const authentication = harness.calls.authenticationOptions[0];
 
   assert.equal(creation.options.rpID, 'localhost');
-  assert.equal(creation.options.rpName, 'SecretCLI');
+  assert.equal(creation.options.rpName, 'Vault');
   assert.equal(creation.options.timeout, 60_000);
   assert.equal(creation.options.attestationType, 'none');
   assert.deepEqual(creation.options.authenticatorSelection, {

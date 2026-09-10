@@ -1,6 +1,6 @@
 # Vault format
 
-SecretCLI has separate public-header and encrypted-data versions. `LEGACY_HEADER_VERSION` is 1, `HEADER_VERSION` is 2, and `DATA_VERSION` is independently fixed at 1. The compatibility export `VERSION` remains the literal value 1 for existing data-format consumers, but new format code does not use it to select a header version. Header versions 1 and 2 are supported. Catalog and object encryption remain data version 1 for both header versions.
+Vault has separate public-header and encrypted-data versions. `LEGACY_HEADER_VERSION` is 1, `HEADER_VERSION` is 2, and `DATA_VERSION` is independently fixed at 1. The compatibility export `VERSION` remains the literal value 1 for existing data-format consumers, but new format code does not use it to select a header version. Header versions 1 and 2 are supported. Catalog and object encryption remain data version 1 for both header versions.
 
 ## Public header v1
 
@@ -63,7 +63,7 @@ The current architecture does not rotate the vault key during passkey enrollment
 
 ## Export archive (`.scvault`)
 
-An export archive is an uncompressed POSIX ustar tar containing one vault directory's encrypted payload. Entry order is fixed: `manifest.json` first, then `vault.json`, `catalog.enc`, then one entry per object under `objects/<uuid>` in sorted order. Runtime files (`.lock/`, `.recovery`, `*.partial`) are never included, and object names must be UUIDs.
+An export archive is an uncompressed POSIX pax/ustar tar containing one vault directory's encrypted payload. Files larger than ustar's size field use a pax `size` record. Entry order is fixed: `manifest.json` first, then `vault.json`, `catalog.enc`, then one entry per object under `objects/<uuid>` in sorted order. Runtime files (`.lock/`, `.recovery`, `*.partial`) are never included, and object names must be UUIDs.
 
 `manifest.json` records:
 
@@ -78,7 +78,7 @@ An export archive is an uncompressed POSIX ustar tar containing one vault direct
 }
 ```
 
-Every non-manifest entry must appear in `files` with a matching size and SHA-256; importers verify each digest while streaming and reject unexpected, missing, duplicated, or oversized entries, archives whose first entry is not `manifest.json`, and archives written by a newer format version. The archive is ciphertext-only: no password, key, or PRF material is ever included, and export requires the vault to be closed (no `.lock`). Because the payload is already encrypted and high-entropy, compression is deliberately not applied. Import is atomic: extraction happens in a temporary sibling directory that is renamed into place only after every checksum verifies and `vault.json` parses as a supported header.
+Every non-manifest entry must appear in `files` with a matching size and SHA-256; importers verify each digest while streaming and reject unexpected, missing, duplicated, or oversized entries, archives whose first entry is not `manifest.json`, and archives written by a newer format version. The archive is ciphertext-only: no password, key, or PRF material is ever included, and export holds the vault's exclusive lock for the complete snapshot. Because the payload is already encrypted and high-entropy, compression is deliberately not applied. Import exclusively reserves a fresh destination, stages `vault.json` under a temporary name, and publishes that header only after all encrypted files and checksums validate. A handled failure removes the reserved destination.
 
 ## Persistence and locking
 

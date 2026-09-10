@@ -27,7 +27,7 @@ test('loadRegistry recovers with a warning from corrupt JSON',async()=>{
 test('loadRegistry drops invalid and duplicate entries, keeps valid ones',async()=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-registry-'));
   try{
-    await writeFile(join(root,'vaults.json'),JSON.stringify({version:2,vaults:[
+    await writeFile(join(root,'vaults.json'),JSON.stringify({version:1,vaults:[
       {name:'good',path:'/tmp/keep'},
       {name:'Bad Name',path:'/tmp/one'},
       {name:'dup',path:'/tmp/one'},
@@ -41,6 +41,16 @@ test('loadRegistry drops invalid and duplicate entries, keeps valid ones',async(
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
+test('loadRegistry rejects unsupported registry versions',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-registry-'));
+  try{
+    await writeFile(join(root,'vaults.json'),JSON.stringify({version:2,vaults:[{name:'work',path:'/tmp/work'}]}));
+    const {registry,warning}=await loadRegistry(join(root,'vaults.json'));
+    assert.deepEqual(registry,emptyRegistry());
+    assert.match(warning,/newer|unsupported/i);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
 test('saveRegistry writes atomically and round-trips through loadRegistry',async()=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-registry-'));
   try{
@@ -51,6 +61,16 @@ test('saveRegistry writes atomically and round-trips through loadRegistry',async
     const {registry:loaded,warning}=await loadRegistry(file);
     assert.equal(warning,undefined);
     assert.deepEqual(loaded,registry);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('saveRegistry creates its private parent directory',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-registry-'));
+  try{
+    const file=join(root,'private','vaults.json');
+    await saveRegistry(file,emptyRegistry());
+    const {registry}=await loadRegistry(file);
+    assert.deepEqual(registry,emptyRegistry());
   }finally{await rm(root,{recursive:true,force:true});}
 });
 

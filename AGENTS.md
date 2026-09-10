@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-SecretCLI is a local encrypted drive. One foreground Node.js process owns the CLI, unlocked vault, and loopback HTTP server.
+Vault is a local encrypted drive. One foreground Node.js process owns the CLI, unlocked vault, and loopback HTTP server.
 
 - `bin/secretcli.js`: executable entry point.
 - `src/cli/`: password prompts, terminal rendering, and process lifecycle.
@@ -26,7 +26,7 @@ There is no build, lint, or formatting command configured. Press `Ctrl+C` to sto
 
 ## Global CLI Installation
 
-The `secretcli` command is installed globally via `npm link`, which symlinks the global bin into this project so code changes are live immediately without reinstalling. If the command is missing or stale (typically after switching Node versions via mise, which keeps links per Node install), re-run `npm link` in this directory. Verify with `which secretcli` (should resolve through `../lib/node_modules/secretcli` to this repo) and `secretcli --help`.
+The `vault` command is installed globally via `npm link`, which symlinks the global bin into this project so code changes are live immediately without reinstalling. If the command is missing or stale (typically after switching Node versions via mise, which keeps links per Node install), re-run `npm link` in this directory. Verify with `which vault` and `vault --help`. The legacy `secretcli` command remains an alias.
 
 ## Coding Style & Naming Conventions
 

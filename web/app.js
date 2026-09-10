@@ -2,7 +2,7 @@ import {bootstrap,request,uploadFile,configureLock,shutdown,isUnlocked} from './
 import {fileCategory,fileIcon,bytes,clearPreview,showPreview,setGallery} from './preview.js';
 import {attachThumbnail,revokeThumbnails} from './thumbnails.js';
 const $=selector=>document.querySelector(selector);
-let entries=[],folders=[],visibleEntries=[],selected=new Set(),parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction;
+let entries=[],folders=[],visibleEntries=[],selected=new Set(),parentId=null,category='all',view='list',query='',sort='name',revision=0,heartbeatTimer,searchTimer,noticeTimer,dragDepth=0,dialogAction,dialogGeneration=0;
 const categoryNames={all:'All files',image:'Images',video:'Videos',audio:'Audio',document:'Documents & other'};
 function element(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;}
 function notice(text,error=false){if(!isUnlocked())return;const node=$('#notice');node.textContent=text;node.className=error?'error':'';node.hidden=false;clearTimeout(noticeTimer);if(!error)noticeTimer=setTimeout(()=>{node.hidden=true;},5000);}
@@ -10,9 +10,9 @@ function selectedEntries(){return visibleEntries.filter(entry=>selected.has(entr
 function renderSelection(){const count=selectedEntries().length,all=visibleEntries.length>0&&count===visibleEntries.length,selectAll=$('#select-all');if(!selectAll)return;selectAll.checked=all;selectAll.indeterminate=count>0&&!all;selectAll.disabled=!visibleEntries.length;for(const input of document.querySelectorAll('.entry-select'))input.checked=selected.has(input.dataset.entryId);$('#selection-count').textContent=`${count} selected`;$('#selection-actions').hidden=count===0;$('#bulk-move').disabled=count===0;$('#bulk-delete').disabled=count===0;}
 function clearSelection(){selected.clear();renderSelection();}
 function lockView(){
-  shutdown();revision++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];visibleEntries=[];clearSelection();parentId=null;query='';dialogAction=null;
+  shutdown();revision++;dialogGeneration++;clearInterval(heartbeatTimer);clearTimeout(searchTimer);clearTimeout(noticeTimer);clearPreview();revokeThumbnails();setGallery([]);entries=[];folders=[];visibleEntries=[];clearSelection();parentId=null;query='';dialogAction=null;
   for(const dialog of document.querySelectorAll('dialog'))dialog.close();
-  const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open SecretCLI in your terminal, then press O to return.'),element('code','npm start'),element('small','This page clears when your CLI session ends.'));
+  const page=element('main',undefined,'locked-page');page.append(element('div','◇','locked-mark'),element('h1','Your vault is locked.'),element('p','Your files are encrypted and tucked away. Open Vault in your terminal, then press O to return.'),element('code','vault'),element('small','This page clears when your CLI session ends.'));
   document.body.replaceChildren(page);document.title='Secret — vault locked';
 }
 configureLock(lockView);
@@ -67,7 +67,7 @@ function render(){
   }
 }
 function dialog({title,description='',fields=[],submit='Save',danger=false,action}){
-  $('#dialog-title').textContent=title;$('#dialog-description').textContent=description;$('#dialog-fields').replaceChildren(...fields);$('#dialog-error').textContent='';$('#dialog-submit').textContent=submit;$('#dialog-submit').className=`button ${danger?'danger':'primary'}`;$('#dialog-submit').disabled=false;dialogAction=action;$('#action-dialog').showModal();
+  dialogGeneration++;$('#dialog-title').textContent=title;$('#dialog-description').textContent=description;$('#dialog-fields').replaceChildren(...fields);$('#dialog-error').textContent='';$('#dialog-submit').textContent=submit;$('#dialog-submit').className=`button ${danger?'danger':'primary'}`;$('#dialog-submit').disabled=false;dialogAction=action;$('#action-dialog').showModal();
   $('#dialog-fields input')?.focus();$('#dialog-fields input')?.select();
 }
 function nameField(value=''){const label=element('label','Name'),input=element('input');input.id='entry-name';label.htmlFor=input.id;input.value=value;input.required=true;input.autocomplete='off';input.maxLength=255;return [label,input];}
@@ -88,7 +88,7 @@ let uploadQueue=Promise.resolve();
 function upload(files){
   if(!isUnlocked())return;const destination=parentId;
   for(const file of files){
-    const row=element('div',undefined,'upload-row'),label=element('span',file.name,'upload-name'),progress=element('progress'),status=element('span','Queued'),cancel=element('button','×');cancel.setAttribute('aria-label',`Cancel upload of ${file.name}`);progress.max=100;progress.value=0;
+    const row=element('div',undefined,'upload-row'),label=element('span',file.name,'upload-name'),progress=element('progress'),status=element('span','Queued'),cancel=element('button','×');cancel.setAttribute('aria-label',`Cancel upload of ${file.name}`);progress.setAttribute('aria-label',`Upload progress for ${file.name}`);status.setAttribute('aria-live','polite');progress.max=100;progress.value=0;
     row.append(label,progress,status,cancel);$('#uploads').append(row);$('#uploads').hidden=false;let cancelled=false,transfer;cancel.onclick=()=>{cancelled=true;transfer?.cancel();status.textContent='Cancelled';cancel.disabled=true;};
     uploadQueue=uploadQueue.then(async()=>{
       if(cancelled||!isUnlocked())return;
@@ -99,8 +99,10 @@ function upload(files){
 }
 $('#upload').onclick=()=>$('#file-input').click();$('#file-input').onchange=event=>{upload([...event.target.files]);event.target.value='';};
 $('#new-folder').onclick=()=>dialog({title:'New folder',fields:nameField(),submit:'Create folder',action:async()=>{await request('/api/folders',{method:'POST',body:{parentId,name:$('#entry-name').value}});notice('Folder created.');}});
-$('#action-form').onsubmit=async event=>{event.preventDefault();$('#dialog-submit').disabled=true;try{await dialogAction();if(isUnlocked()){$('#action-dialog').close();dialogAction=null;await load();}}catch(error){if(isUnlocked())$('#dialog-error').textContent=error.message;}finally{if(isUnlocked())$('#dialog-submit').disabled=false;}};
-for(const id of ['#dialog-close','#dialog-cancel'])$(id).onclick=()=>$('#action-dialog').close();
+function closeActionDialog(){dialogGeneration++;dialogAction=null;$('#action-dialog').close();}
+$('#action-form').onsubmit=async event=>{event.preventDefault();const generation=dialogGeneration,action=dialogAction;if(typeof action!=='function')return;$('#dialog-submit').disabled=true;try{await action();if(isUnlocked()&&generation===dialogGeneration){closeActionDialog();await load();}}catch(error){if(isUnlocked()&&generation===dialogGeneration)$('#dialog-error').textContent=error.message;}finally{if(isUnlocked()&&generation===dialogGeneration)$('#dialog-submit').disabled=false;}};
+for(const id of ['#dialog-close','#dialog-cancel'])$(id).onclick=closeActionDialog;
+$('#action-dialog').addEventListener('cancel',event=>{event.preventDefault();closeActionDialog();});
 $('#preview-close').onclick=clearPreview;$('#preview-dialog').addEventListener('cancel',event=>{event.preventDefault();clearPreview();});
 $('#select-all').onchange=event=>{if(event.target.checked)for(const entry of visibleEntries)selected.add(entry.id);else clearSelection();renderSelection();};$('#bulk-move').onclick=bulkMove;$('#bulk-delete').onclick=bulkDelete;$('#clear-selection').onclick=clearSelection;
 $('#sort').onchange=event=>{clearSelection();sort=event.target.value;render();};

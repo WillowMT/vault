@@ -2,7 +2,7 @@ import {fileCategory,fileIcon} from './preview.js';
 const MAX=320,TIMEOUT=10000,LIMIT=3;
 const THUMBABLE=new Set(['image/png','image/jpeg','image/gif','image/webp','image/avif','image/bmp','video/mp4','video/webm','video/ogg','video/quicktime']);
 const cache=new Map(),pending=new Map(),jobs=new Map();
-let queue=[],active=0,override=null,observer=null;
+let queue=[],active=0,override=null,observer=null,generation=0;
 const cacheKey=entry=>`${entry.id}:${entry.size}`;
 export function setThumbnailGenerator(fn){override=fn;}
 function withTimeout(promise){return Promise.race([promise,new Promise(resolve=>setTimeout(()=>resolve(null),TIMEOUT))]);}
@@ -30,9 +30,10 @@ export function thumbnailFor(entry){
   const key=cacheKey(entry);
   if(cache.has(key))return Promise.resolve(cache.get(key));
   if(pending.has(key))return pending.get(key);
-  const promise=schedule(()=>withTimeout((override||defaultGenerator)(entry)))
-    .then(url=>{pending.delete(key);if(url){cache.set(key,url);return url;}return null;})
-    .catch(()=>{pending.delete(key);return null;});
+  const current=generation;let promise;
+  promise=schedule(()=>withTimeout((override||defaultGenerator)(entry)))
+    .then(url=>{if(pending.get(key)===promise)pending.delete(key);if(current!==generation){if(url)URL.revokeObjectURL(url);return null;}if(url){cache.set(key,url);return url;}return null;})
+    .catch(()=>{if(pending.get(key)===promise)pending.delete(key);return null;});
   pending.set(key,promise);return promise;
 }
 function ensureObserver(){
@@ -42,7 +43,7 @@ function ensureObserver(){
   },{rootMargin:'200px'});
   return observer;
 }
-function apply(tile,url){const img=document.createElement('img');img.alt='';img.src=url;tile.replaceChildren(img);}
+function apply(tile,url){const img=document.createElement('img');img.alt='';img.width=MAX;img.height=MAX;img.loading='lazy';img.src=url;tile.replaceChildren(img);}
 export function attachThumbnail(tile,entry){
   tile.append(fileIcon(entry));
   if(cache.has(cacheKey(entry))){apply(tile,cache.get(cacheKey(entry)));return;}
@@ -51,7 +52,8 @@ export function attachThumbnail(tile,entry){
   if(obs){jobs.set(tile,run);obs.observe(tile);}else run();
 }
 export function revokeThumbnails(){
+  generation++;
   for(const url of cache.values())URL.revokeObjectURL(url);
-  cache.clear();pending.clear();jobs.clear();queue=[];active=0;
+  cache.clear();pending.clear();jobs.clear();for(const item of queue)item.resolve(null);queue=[];
   observer?.disconnect();observer=null;
 }

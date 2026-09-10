@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp,rm,mkdir,writeFile } from 'node:fs/promises';
+import { mkdtemp,rm,mkdir,writeFile,open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readPassword,readText } from '../src/cli/prompt.js';
@@ -50,17 +50,21 @@ test('v1 vault unlocks once then starts browser-required enrollment',async()=>{
   await ready;for(let i=0;!opened&&i<20;i++)await new Promise(resolve=>setTimeout(resolve,1));input.write('l');await new Promise(resolve=>setTimeout(resolve,1));input.write('q');await running;
   assert.equal(unlocks,1);assert.ok(enrollment.recovery.equals(password));assert.equal(opened,'http://localhost:1/');assert.equal(renewals,0);assert.match(text,/passkey setup required/i);assert.doesNotMatch(text,/Could not create a browser link/);
 });
-test('new vault starts browser-required enrollment with its recovery password',async()=>{
+test('new vault starts browser-required enrollment with its recovery password and is registered',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-new-cli-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
   const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
   const output=new PassThrough();let created,enrollment;
-  let running;const path=`/tmp/secretcli-new-${process.pid}-${Date.now()}`;const ready=new Promise(resolve=>{
-    running=run({argv:['--vault',path],stdin:input,stdout:output,passwordReader:async()=>Buffer.from('recovery password'),
+  const registryPath=join(root,'vaults.json');let running;const path=join(root,'vault');const ready=new Promise(resolve=>{
+    running=run({argv:['--vault',path],registryPath,stdin:input,stdout:output,passwordReader:async()=>Buffer.from('recovery password'),
       createVault:async(path,password)=>{created={path,password:Buffer.from(password)};return {close:async()=>{}};},
       startEnrollmentServer:async(vault,recovery)=>{enrollment={vault,recovery:Buffer.from(recovery)};return {origin:'http://localhost:1',launchUrl:'http://localhost:1/',close:async()=>{}};},
       onReady:resolve});
   });
   await ready;input.write('q');await running;
   assert.equal(created.password.toString(),'recovery password');assert.equal(enrollment.recovery.toString(),'recovery password');
+  const {registry}=await (await import('../src/vault/registry.js')).loadRegistry(registryPath);
+  assert.equal(registry.vaults[0].path,path);
 });
 test('v2 starts locked without a password prompt and R recovers into a fresh browser link',async()=>{
   const input=new PassThrough();input.isTTY=true;input.setRawMode=()=>{};
@@ -88,7 +92,7 @@ test('vault picker selects by number and arrow keys, and quits on q',async()=>{
   const output=new PassThrough();let text='';output.on('data',data=>text+=data);
   const entries=[{name:'alpha',path:'/tmp/a'},{name:'beta',path:'/tmp/b',missing:true}];
   const numbered=chooseVault({input,stdout:output,entries});
-  input.write('2');
+  input.write('2\r');
   assert.deepEqual(await numbered,{name:'beta',path:'/tmp/b',missing:true});
   const arrows=chooseVault({input,stdout:output,entries});
   input.write('\x1b[B\r');
@@ -183,7 +187,7 @@ test('export and import commands round-trip a vault and register the copy',async
   text='';await run({argv:['export','--vault','copy','--to',join(root,'second.scvault')],stdin:new PassThrough(),stdout:output,registryPath});
   assert.match(text,/Exported/);
 });
-test('import refuses an existing destination and reports registry conflicts',async t=>{
+test('import refuses existing destinations and registry conflicts without leaving a vault',async t=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-import-'));
   t.after(()=>rm(root,{recursive:true,force:true}));
   const registryPath=join(root,'vaults.json'),vault=join(root,'source');
@@ -195,6 +199,7 @@ test('import refuses an existing destination and reports registry conflicts',asy
   await run({argv:['export','--vault',vault,'--to',archive],stdin:new PassThrough(),stdout:output,registryPath});
   await run({argv:['import',archive,'--out',join(root,'copy'),'--name','dup'],stdin:new PassThrough(),stdout:output,registryPath});
   await assert.rejects(run({argv:['import',archive,'--out',join(root,'copy')],stdin:new PassThrough(),stdout:output,registryPath}),/already exists/i);
-  text='';await run({argv:['import',archive,'--out',join(root,'other'),'--name','dup'],stdin:new PassThrough(),stdout:output,registryPath});
-  assert.match(text,/could not be registered/i);
+  const conflicting=join(root,'other');
+  await assert.rejects(run({argv:['import',archive,'--out',conflicting,'--name','dup'],stdin:new PassThrough(),stdout:output,registryPath}),/already in use/i);
+  await assert.rejects(()=>open(conflicting,'r'),/ENOENT/);
 });

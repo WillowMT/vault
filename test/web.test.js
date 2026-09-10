@@ -43,7 +43,7 @@ test('enrollment page confirms the registered credential with its PRF result',as
   const registered={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',authenticatorAttachment:'platform',response};
   const confirmed={id:'new-credential',rawId:Uint8Array.of(1).buffer,type:'public-key',response:{authenticatorData:Uint8Array.of(4).buffer,clientDataJSON:Uint8Array.of(5).buffer,signature:Uint8Array.of(6).buffer,userHandle:null},getClientExtensionResults:()=>({prf:{results:{first:result.buffer}}})};
   let gets=0;
-  const registration={challenge:'AQI',rp:{id:'localhost',name:'SecretCLI'},user:{id:'BQY',name:'vault',displayName:'Vault'}};
+  const registration={challenge:'AQI',rp:{id:'localhost',name:'Vault'},user:{id:'BQY',name:'vault',displayName:'Vault'}};
   const confirmation={challenge:'AwQ',allowCredentials:[{id:'AQ',type:'public-key'}]};
   const {window,requests}=await unlockPage('enrollment',[registration,confirmation],{create:async options=>{assert.equal(options.publicKey.rp.id,'localhost');assert.equal(options.publicKey.user.id.byteLength,2);return registered;},get:async options=>{gets++;assert.equal(options.publicKey.allowCredentials[0].id.byteLength,1);return confirmed;}});
 
@@ -77,6 +77,13 @@ test('browser UI creates folders, uploads, searches, renames, moves and clears o
   const window=page.mainFrame.window,doc=window.document;
   await until(()=>doc.querySelector('#item-count')?.textContent==='0 items',()=>`App did not initialize: ${page.virtualConsolePrinter.readAsString()} ${doc.body.textContent.slice(-500)}`);
   assert.equal(page.url.includes('#'),false);
+  const nativeFetch=window.fetch.bind(window);let finishStale;
+  window.fetch=(path,init)=>path==='/api/folders'&&init?.method==='POST'?new Promise(resolve=>{finishStale=()=>resolve({ok:true,status:201,json:async()=>({})});}):nativeFetch(path,init);
+  doc.querySelector('#new-folder').click();doc.querySelector('#entry-name').value='Stale';doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  doc.querySelector('#dialog-cancel').click();doc.querySelector('#new-folder').click();doc.querySelector('#entry-name').value='Fresh';finishStale();await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(doc.querySelector('#action-dialog').open,true,'Stale action closed a newer dialog');
+  assert.equal(doc.querySelector('#entry-name').value,'Fresh','Stale action overwrote a newer dialog');
+  doc.querySelector('#dialog-cancel').click();window.fetch=nativeFetch;
   doc.querySelector('#new-folder').click();doc.querySelector('#entry-name').value='Pictures';doc.querySelector('#action-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
   await until(()=>doc.querySelector('.file-name-text')?.textContent==='Pictures','Folder did not appear');
   const input=doc.querySelector('#file-input');const transfer=new window.DataTransfer();transfer.items.add(new window.File(['test image'],'photo.png',{type:'image/png'}));input.files=transfer.files;input.dispatchEvent(new window.Event('change'));
@@ -118,6 +125,11 @@ test('preview dialog renders pdf, text, and voice-note players',{timeout:20000},
   const frame=doc.querySelector('#preview-content iframe.pdf-frame');
   assert.ok(frame,'PDF iframe missing');assert.ok(frame.src.includes('/content'),'PDF iframe src wrong');
   doc.querySelector('#preview-close').click();
+  const nativeFetch=window.fetch.bind(window);let finishText;
+  window.fetch=(path,init)=>String(path).endsWith('/content')?new Promise(resolve=>{finishText=()=>resolve({ok:true,body:null,text:async()=>'stale text'});}):nativeFetch(path,init);
+  await open('notes.txt');doc.querySelector('#preview-close').click();await open('voice.mp3');finishText();await new Promise(resolve=>setTimeout(resolve,0));
+  assert.ok(doc.querySelector('#preview-content .voice-note'),'Stale text response replaced a newer preview');
+  doc.querySelector('#preview-close').click();window.fetch=nativeFetch;
   await open('notes.txt');
   assert.ok(!doc.querySelector('#preview-dialog').classList.contains('slideshow'),'Text preview must not use slideshow mode');
   const pre=await (async()=>{for(let i=0;i<150;i++){const node=doc.querySelector('#preview-content pre.text-preview');if(node?.textContent==='hello secret vault')return node;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('Text preview did not load');})();
@@ -164,8 +176,15 @@ test('image preview navigates the gallery with arrows and keyboard',{timeout:200
   await until(()=>title()==='sunrise.png','ArrowRight did not wrap to sunrise.png');
   dialog.dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));
   await until(()=>title()==='sunset.png','ArrowLeft did not step back to sunset.png');
+  let fullscreen=false,exits=0;
+  Object.defineProperty(doc,'fullscreenElement',{configurable:true,get:()=>fullscreen?doc.documentElement:null});
+  doc.documentElement.requestFullscreen=async()=>{fullscreen=true;};
+  doc.exitFullscreen=async()=>{fullscreen=false;exits++;};
+  doc.querySelector('.gallery-fullscreen').click();await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(fullscreen,true,'Fullscreen toggle did not enter fullscreen');
   doc.querySelector('#preview-close').click();
   await until(()=>!doc.querySelector('#preview-dialog[open]'),'Preview did not close');
+  assert.equal(exits,1,'Closing slideshow did not exit fullscreen');
   await open('sunset.png');
   assert.ok(doc.querySelector('.gallery-next'),'Arrows missing after reopening');
   doc.querySelector('#preview-close').click();
@@ -190,9 +209,16 @@ test('video preview navigates the gallery with arrows and keyboard',{timeout:200
   const title=()=>doc.querySelector('#preview-title').textContent;
   await open('first.webm');
   assert.ok(doc.querySelector('#preview-dialog').classList.contains('slideshow'),'Video preview must open in slideshow mode');
+  const video=doc.querySelector('video');
+  assert.equal(video.autoplay,true,'Video preview must autoplay');
+  assert.equal(video.muted,true,'Autoplaying video must start muted for browser compatibility');
+  assert.equal(video.playsInline,true,'Video must remain inline on mobile');
   assert.ok(doc.querySelector('.gallery-prev')&&doc.querySelector('.gallery-next'),'Gallery arrows missing');
   assert.equal(doc.querySelector('.gallery-counter').textContent,'1 / 2','Counter should show first position');
   assert.ok(doc.querySelector('.gallery-fullscreen'),'Fullscreen toggle missing');
+  doc.querySelector('video').dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(title(),'first.webm','Gallery shortcuts must not override focused video controls');
   doc.querySelector('.gallery-next').click();
   await until(()=>title()==='second.webm','Next arrow did not advance to second.webm');
   doc.querySelector('#preview-dialog').dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));

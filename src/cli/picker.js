@@ -5,7 +5,7 @@ export function chooseVault({input,stdout,entries,allowCreate=false,signal}){
   }
   return new Promise((resolve,reject)=>{
     const options=[...entries];if(allowCreate)options.push('create');
-    let index=0,finished=false,count=0;
+    let index=0,finished=false,count=0,digits='';
     const wasRaw=Boolean(input.isRaw);
     function line(option,position){
       const marker=position===index?'▸':' ';
@@ -35,14 +35,16 @@ export function chooseVault({input,stdout,entries,allowCreate=false,signal}){
         const character=data[position];
         if(character==='\x1b'){
           const sequence=data.slice(position,position+3);
-          if(sequence==='\x1b[A'){index=Math.max(0,index-1);render();position+=3;continue;}
-          if(sequence==='\x1b[B'){index=Math.min(options.length-1,index+1);render();position+=3;continue;}
+          if(sequence==='\x1b[A'){digits='';index=Math.max(0,index-1);render();position+=3;continue;}
+          if(sequence==='\x1b[B'){digits='';index=Math.min(options.length-1,index+1);render();position+=3;continue;}
           position++;continue;
         }
         if(character==='\x03'||character==='\x04'||character==='q'){cancel();return;}
         if(character==='\r'||character==='\n'){finish(options[index]);return;}
-        const digit=Number(character);
-        if(Number.isInteger(digit)&&digit>=1&&digit<=options.length){index=digit-1;finish(options[index]);return;}
+        if(character>='0'&&character<='9'){
+          const candidate=Number(digits+character);
+          if(candidate>=1&&candidate<=options.length){digits+=character;index=candidate-1;render();}
+        }
         position++;
       }
     }

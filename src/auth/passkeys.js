@@ -131,7 +131,7 @@ export function createPasskeyService({
       const prfSalt = random32('WebAuthn PRF salt');
       const challenge = challengeBytes.toString('base64url');
       const options = await generateRegistrationOptions({
-        rpName: 'SecretCLI',
+        rpName: 'Vault',
         rpID: RP_ID,
         userID,
         userName,

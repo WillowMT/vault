@@ -1,6 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 export function readPassword({input,output,label,signal}){
-  if(!input.isTTY||typeof input.setRawMode!=='function')return Promise.reject(new Error('Run SecretCLI in an interactive terminal to enter your password.'));
+  if(!input.isTTY||typeof input.setRawMode!=='function')return Promise.reject(new Error('Run Vault in an interactive terminal to enter your password.'));
   return new Promise((resolve,reject)=>{
     const decoder=new StringDecoder('utf8');let characters=[],finished=false;
     const wasRaw=Boolean(input.isRaw);
@@ -28,7 +28,7 @@ export function readPassword({input,output,label,signal}){
 }
 
 export function readText({input,output,label,signal}){
-  if(!input.isTTY||typeof input.setRawMode!=='function')return Promise.reject(new Error('Run SecretCLI in an interactive terminal to continue.'));
+  if(!input.isTTY||typeof input.setRawMode!=='function')return Promise.reject(new Error('Run Vault in an interactive terminal to continue.'));
   return new Promise((resolve,reject)=>{
     let value='',finished=false;
     const wasRaw=Boolean(input.isRaw);

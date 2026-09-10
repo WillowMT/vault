@@ -4,6 +4,7 @@ import { mkdtemp,rm,mkdir,writeFile,readFile,open,readdir } from 'node:fs/promis
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createVault,unlockVault } from '../src/vault/vault.js';
+import { acquireLock } from '../src/vault/lock.js';
 import { exportVault,importVault } from '../src/vault/archive.js';
 
 async function collect(vault){
@@ -39,6 +40,20 @@ test('export and import round-trip a vault with multi-chunk objects',async t=>{
   assert.equal(files['big.bin'].every(byte=>byte===7),true);
 });
 
+test('an empty vault imports with its required objects directory',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-empty-archive-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const password=Buffer.from('empty archive passphrase'),source=join(root,'vault');
+  const vault=await createVault(source,password);await vault.close();
+  const archive=join(root,'empty.scvault'),restored=join(root,'restored');
+  await exportVault({directory:source,output:archive});
+  await importVault({archive,directory:restored});
+  assert.deepEqual(await readdir(join(restored,'objects')),[]);
+  const reopened=await unlockVault(restored,password);
+  assert.deepEqual(reopened.list(),[]);
+  await reopened.close();
+});
+
 test('export refuses a running vault and a vault pending manual recovery',async t=>{
   const root=await mkdtemp(join(tmpdir(),'secretcli-archive-lock-'));
   t.after(()=>rm(root,{recursive:true,force:true}));
@@ -46,8 +61,26 @@ test('export refuses a running vault and a vault pending manual recovery',async 
   await assert.rejects(()=>exportVault({directory:join(root,'vault'),output:join(root,'a.scvault')}),/open/i);
   await vault.close();
   await exportVault({directory:join(root,'vault'),output:join(root,'a.scvault')});
+  await assert.rejects(()=>exportVault({directory:join(root,'vault'),output:join(root,'a.scvault')}),/already exists/i);
   await mkdir(join(root,'vault','.recovery'));
   await assert.rejects(()=>exportVault({directory:join(root,'vault'),output:join(root,'b.scvault')}),/recovery/i);
+});
+
+test('export holds the exclusive vault lock for the entire snapshot',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-archive-lock-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const directory=join(root,'vault');
+  const vault=await createVault(directory,Buffer.from('archive snapshot passphrase'));await vault.close();
+  const extra=await open(join(directory,'objects','11111111-1111-4111-8111-111111111111'),'wx');
+  await extra.truncate(16*1048576);await extra.close();
+  const exporting=exportVault({directory,output:join(root,'snapshot.scvault')});
+  for(let attempt=0;attempt<100;attempt++){
+    if((await readdir(directory)).includes('.lock'))break;
+    await new Promise(resolve=>setTimeout(resolve,1));
+  }
+  await assert.rejects(()=>acquireLock(directory),/already open/i);
+  await exporting;
+  assert.equal((await readdir(directory)).includes('.lock'),false);
 });
 
 test('export skips partial objects and import refuses an existing destination',async t=>{
@@ -79,8 +112,27 @@ test('import rejects corrupted and truncated archives without writing the destin
   const restored=join(root,'restored');
   await assert.rejects(()=>importVault({archive:corrupted,directory:restored}),/corrupt|mismatch/i);
   await assert.rejects(()=>open(restored,'r'),/ENOENT/);
+  assert.equal((await readdir(root)).some(name=>name.endsWith('.importing')),false);
   const truncated=join(root,'truncated.scvault');await writeFile(truncated,bytes.subarray(0,bytes.length-1024));
   await assert.rejects(()=>importVault({archive:truncated,directory:restored}),/corrupt|truncated|unexpected end/i);
+  assert.equal((await readdir(root)).some(name=>name.endsWith('.importing')),false);
+});
+
+test('import requires manifest identity to match vault.json',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'secretcli-archive-identity-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const source=join(root,'vault'),vault=await createVault(source,Buffer.from('archive identity passphrase'));
+  await vault.close();
+  const archive=join(root,'backup.scvault');await exportVault({directory:source,output:archive});
+  const bytes=await readFile(archive),size=parseInt(bytes.toString('utf8',124,136).replace(/\0/g,'').trim(),8);
+  const manifest=JSON.parse(bytes.toString('utf8',512,512+size));
+  manifest.vaultId='11111111-1111-4111-8111-111111111111';
+  const replacement=Buffer.from(`${JSON.stringify(manifest,null,1)}\n`);
+  assert.equal(replacement.length,size);
+  replacement.copy(bytes,512);
+  const changed=join(root,'changed.scvault');await writeFile(changed,bytes);
+  await assert.rejects(()=>importVault({archive:changed,directory:join(root,'restored')}),/identity|does not match/i);
+  assert.equal((await readdir(root)).some(name=>name.endsWith('.importing')),false);
 });
 
 test('export rejects vault headers from a newer format version',async t=>{
